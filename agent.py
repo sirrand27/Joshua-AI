@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Joshua AI Agent — Network Defense Sentry
+W.O.P.R. Network Defense Sentry
 Monitors the network via UniFi MCP and posts observations
 to the Blackboard Live Activity feed.
 
@@ -37,7 +37,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("joshua")
+logger = logging.getLogger("wopr")
 
 
 class JoshuaAgent:
