@@ -151,20 +151,91 @@ def court_records_case(case_number, court=""):
 
 # === UniFi MCP Wrappers ===
 
-def _mcp_call(base_url, tool_name, arguments=None, timeout=15):
-    """Generic MCP tool call via HTTP POST."""
+_mcp_sessions = {}  # base_url -> session_id
+
+
+def _mcp_init_session(base_url, timeout=10):
+    """Initialize an MCP streamable-http session, return session_id."""
     url = f"{base_url}/mcp"
-    data = {
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "joshua_tools", "version": "1.0"}
+        }
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            session_id = resp.headers.get("mcp-session-id")
+            if session_id:
+                _mcp_sessions[base_url] = session_id
+                return session_id
+    except Exception:
+        pass
+    return None
+
+
+def _mcp_call(base_url, tool_name, arguments=None, timeout=15):
+    """Generic MCP tool call via streamable-http POST."""
+    # Ensure session for servers that require it (UniFi MCP)
+    session_id = _mcp_sessions.get(base_url)
+    if not session_id:
+        session_id = _mcp_init_session(base_url)
+
+    url = f"{base_url}/mcp"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
         "method": "tools/call",
         "params": {
             "name": tool_name,
             "arguments": arguments or {}
         }
     }
-    result = _http_request(url, method="POST", data=data, timeout=timeout)
-    if "error" in result:
-        return f"[ERROR] MCP {tool_name}: {result['error']}"
-    return json.dumps(result, indent=2)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
+    }
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            # Parse SSE response
+            for line in raw.split("\n"):
+                if line.startswith("data:"):
+                    data = json.loads(line[5:].strip())
+                    if "result" in data:
+                        content = data["result"].get("content", [])
+                        for c in content:
+                            text = c.get("text", "")
+                            try:
+                                return json.dumps(json.loads(text), indent=2)
+                            except (json.JSONDecodeError, ValueError):
+                                return text
+                    if "error" in data:
+                        return f"[ERROR] MCP {tool_name}: {data['error']}"
+            return f"[ERROR] MCP {tool_name}: no result in response"
+    except Exception as e:
+        # Session expired — clear and retry once
+        if session_id and "400" in str(e):
+            _mcp_sessions.pop(base_url, None)
+            return _mcp_call(base_url, tool_name, arguments, timeout)
+        return f"[ERROR] MCP {tool_name}: {e}"
 
 
 def unifi_get_clients():

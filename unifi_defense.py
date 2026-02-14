@@ -30,7 +30,7 @@ DEFENSE_POLL_INTERVAL = 30
 
 
 class UniFiMCPClient:
-    """HTTP client for UniFi MCP on localhost:9600."""
+    """HTTP client for UniFi MCP on localhost:9600 (streamable-http transport)."""
 
     def __init__(self, base_url=None):
         import urllib.request
@@ -38,26 +38,97 @@ class UniFiMCPClient:
         self.base_url = (base_url or UNIFI_MCP_URL).rstrip("/")
         self._urllib = urllib.request
         self._urllib_error = urllib.error
+        self._session_id = None
+        self._request_id = 0
+
+    def _next_id(self):
+        self._request_id += 1
+        return self._request_id
+
+    def _ensure_session(self):
+        """Initialize MCP session if not yet established."""
+        if self._session_id:
+            return True
+        url = f"{self.base_url}/mcp"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "joshua_defense", "version": "1.0"}
+            }
+        }
+        body = json.dumps(payload).encode()
+        req = self._urllib.Request(
+            url, data=body, method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            }
+        )
+        try:
+            with self._urllib.urlopen(req, timeout=10) as resp:
+                session_id = resp.headers.get("mcp-session-id")
+                if session_id:
+                    self._session_id = session_id
+                    logger.info(f"UniFi MCP session established: {session_id[:12]}...")
+                    return True
+                logger.error("UniFi MCP initialize returned no session ID")
+                return False
+        except Exception as e:
+            logger.error(f"UniFi MCP session init failed: {e}")
+            return False
 
     def _call_tool(self, tool_name, arguments=None, timeout=15):
         """Call an MCP tool on the UniFi MCP server."""
+        if not self._ensure_session():
+            return None
+
         url = f"{self.base_url}/mcp"
-        data = {
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
             "method": "tools/call",
             "params": {
                 "name": tool_name,
                 "arguments": arguments or {}
             }
         }
-        body = json.dumps(data).encode()
-        req = self._urllib.Request(
-            url, data=body, method="POST",
-            headers={"Content-Type": "application/json"}
-        )
+        body = json.dumps(payload).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        req = self._urllib.Request(url, data=body, method="POST", headers=headers)
         try:
             with self._urllib.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+                raw = resp.read().decode("utf-8")
+                # Parse SSE response
+                for line in raw.split("\n"):
+                    if line.startswith("data:"):
+                        data = json.loads(line[5:].strip())
+                        if "result" in data:
+                            content = data["result"].get("content", [])
+                            for c in content:
+                                text = c.get("text", "")
+                                try:
+                                    return json.loads(text)
+                                except (json.JSONDecodeError, ValueError):
+                                    return {"text": text}
+                        if "error" in data:
+                            logger.error(f"UniFi MCP error: {data['error']}")
+                            return None
+                return None
         except Exception as e:
+            # Session may have expired — reset and retry once
+            if self._session_id and "400" in str(e):
+                self._session_id = None
+                return self._call_tool(tool_name, arguments, timeout)
             logger.error(f"UniFi MCP call failed: {tool_name} — {e}")
             return None
 
@@ -320,6 +391,13 @@ class UniFiDefenseLoop:
 
             time.sleep(DEFENSE_POLL_INTERVAL)
 
+    def _post_activity(self, activity, entry_type="CMD"):
+        """Post to Blackboard activity log for Live Activity display."""
+        try:
+            self.blackboard.post_activity(activity, entry_type=entry_type)
+        except Exception:
+            pass  # Never let activity logging break the defense loop
+
     def _poll_cycle(self):
         """Single polling cycle."""
         # 1. Get threat summary
@@ -331,6 +409,7 @@ class UniFiDefenseLoop:
         clients_result = self.unifi.get_clients()
         if clients_result and not clients_result.get("error"):
             clients = clients_result if isinstance(clients_result, list) else clients_result.get("result", [])
+            client_count = len(clients) if isinstance(clients, list) else 0
             anomalies = self.baseline.update_client_list(clients)
             for anomaly in anomalies:
                 self._handle_anomaly(anomaly)
@@ -344,9 +423,18 @@ class UniFiDefenseLoop:
         # 4. Log baseline summary periodically (every 20th cycle = ~10 min)
         if self._poll_count % 20 == 0 and self._poll_count > 0:
             summary = self.baseline.get_summary()
-            logger.info(f"Baseline: {summary['total_known_clients']} clients, "
-                        f"{summary['known_ouis']} OUIs, "
-                        f"ready={summary['baseline_ready']}")
+            status_msg = (f"Defense cycle #{self._poll_count}: "
+                          f"{summary['total_known_clients']} clients tracked, "
+                          f"{summary['known_ouis']} OUIs, "
+                          f"baseline={'READY' if summary['baseline_ready'] else 'LEARNING'}")
+            logger.info(status_msg)
+            self._post_activity(status_msg)
+
+        # 5. Post baseline established event (once)
+        if self._poll_count == self.baseline._min_learning_cycles and self.baseline.baseline_ready:
+            self._post_activity(
+                f"Behavioral baseline established: {self.baseline.get_summary()['total_known_clients']} clients cataloged"
+            )
 
     def _process_threat_summary(self, summary):
         """Process threat summary from UniFi MCP."""
@@ -393,6 +481,9 @@ class UniFiDefenseLoop:
         severity, description, auto_respond = self.classifier.classify(anomaly)
 
         logger.warning(f"[{severity}] {description}")
+
+        # Post to Live Activity window
+        self._post_activity(f"[{severity}] {description}")
 
         # CRITICAL: auto-respond (block + voice + Blackboard)
         if auto_respond and severity == SEVERITY_CRITICAL:
