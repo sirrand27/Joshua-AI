@@ -379,17 +379,33 @@ class UniFiDefenseLoop:
 
     def _loop(self):
         """Main polling loop."""
-        # Initial announcement
-        self.voice.speak("WOPR defense grid online. Monitoring network perimeter.")
+        try:
+            self.voice.speak("WOPR defense grid online. Monitoring network perimeter.")
+        except Exception as e:
+            logger.warning(f"Voice announcement failed: {e}")
+
+        logger.info("Defense loop entering main cycle")
 
         while self._running:
             try:
                 self._poll_cycle()
                 self._poll_count += 1
+
+                # Log every cycle for the first 3, then every 10th
+                if self._poll_count <= 3 or self._poll_count % 10 == 0:
+                    summary = self.baseline.get_summary()
+                    logger.info(
+                        f"Defense cycle #{self._poll_count}: "
+                        f"{summary['total_known_clients']} clients, "
+                        f"{summary['known_ouis']} OUIs, "
+                        f"baseline={'READY' if summary['baseline_ready'] else 'LEARNING'}"
+                    )
             except Exception as e:
                 logger.error(f"Defense loop error: {e}", exc_info=True)
 
             time.sleep(DEFENSE_POLL_INTERVAL)
+
+        logger.info("Defense loop exited main cycle")
 
     def _post_activity(self, activity, entry_type="CMD"):
         """Post to Blackboard activity log for Live Activity display."""
@@ -408,7 +424,15 @@ class UniFiDefenseLoop:
         # 2. Get current client list and update baseline
         clients_result = self.unifi.get_clients()
         if clients_result and not clients_result.get("error"):
-            clients = clients_result if isinstance(clients_result, list) else clients_result.get("result", [])
+            # UniFi MCP returns {"summary": ..., "clients": [...]}
+            if isinstance(clients_result, list):
+                clients = clients_result
+            elif isinstance(clients_result, dict):
+                clients = (clients_result.get("clients")
+                           or clients_result.get("result")
+                           or [])
+            else:
+                clients = []
             client_count = len(clients) if isinstance(clients, list) else 0
             anomalies = self.baseline.update_client_list(clients)
             for anomaly in anomalies:
@@ -420,15 +444,14 @@ class UniFiDefenseLoop:
             if alerts and not alerts.get("error"):
                 self._process_alerts(alerts)
 
-        # 4. Log baseline summary periodically (every 20th cycle = ~10 min)
-        if self._poll_count % 20 == 0 and self._poll_count > 0:
+        # 4. Post to Live Activity periodically (every 10th cycle = ~5 min)
+        if self._poll_count % 10 == 0 and self._poll_count > 0:
             summary = self.baseline.get_summary()
-            status_msg = (f"Defense cycle #{self._poll_count}: "
+            status_msg = (f"[DEFENSE] Cycle #{self._poll_count}: "
                           f"{summary['total_known_clients']} clients tracked, "
                           f"{summary['known_ouis']} OUIs, "
                           f"baseline={'READY' if summary['baseline_ready'] else 'LEARNING'}")
-            logger.info(status_msg)
-            self._post_activity(status_msg)
+            self._post_activity(status_msg, entry_type="OUT")
 
         # 5. Post baseline established event (once)
         if self._poll_count == self.baseline._min_learning_cycles and self.baseline.baseline_ready:

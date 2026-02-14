@@ -10,6 +10,24 @@ from config import VOICE_HOST, VOICE_PORT, VOICE_ENABLED, SPEAK_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
+# Pronunciation substitutions for F5-TTS (case-insensitive replacements)
+_PRONUNCIATION_MAP = {
+    "WOPR": "Whopper",
+    "W.O.P.R.": "Whopper",
+    "W.O.P.R": "Whopper",
+    "wopr": "Whopper",
+    "OSINT": "oh-sint",
+    "MCP": "M C P",
+    "DEFCON": "def-con",
+}
+
+
+def _fix_pronunciation(text):
+    """Apply pronunciation substitutions for TTS clarity."""
+    for token, replacement in _PRONUNCIATION_MAP.items():
+        text = text.replace(token, replacement)
+    return text
+
 
 class VoiceClient:
     """TCP client for Joshua F5-TTS voice server."""
@@ -32,6 +50,9 @@ class VoiceClient:
         voice_text = text[:500].strip()
         if len(text) > 500:
             voice_text += "..."
+
+        # Apply pronunciation fixes
+        voice_text = _fix_pronunciation(voice_text)
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

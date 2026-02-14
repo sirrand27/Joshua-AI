@@ -165,7 +165,7 @@ class BlackboardClient:
         """Post to the activity log."""
         return self._mcp_call("post_activity", {
             "agent_name": AGENT_NAME,
-            "activity": activity,
+            "content": activity,
             "entry_type": entry_type
         })
 

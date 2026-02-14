@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════╗
 # ║  W.O.P.R. LAUNCH SEQUENCE                   ║
-# ║  Starts Joshua + all MCP services            ║
+# ║  Starts W.O.P.R. sentry + all MCP services  ║
 # ╚══════════════════════════════════════════════╝
 
 DIR="$(dirname "$(readlink -f "$0")")"
@@ -71,12 +71,12 @@ else
     systemctl --user start joshua-voice 2>/dev/null || echo "[WOPR] Joshua Voice (:9876) — no service (manual start needed)"
 fi
 
-# 6. Local Joshua Agent
+# 6. W.O.P.R. Sentry Agent
 launch_service \
-    "Local Joshua Agent" \
-    "python3.*agent.py.*joshua" \
+    "W.O.P.R. Sentry" \
+    "python3.*local_joshua.*agent.py" \
     "cd '$DIR' && python3 agent.py" \
-    "$LOG_DIR/joshua.log"
+    "$LOG_DIR/wopr.log"
 
 echo ""
 echo "╔══════════════════════════════════════╗"
