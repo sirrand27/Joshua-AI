@@ -36,8 +36,8 @@ BLACKBOARD_URL = os.environ.get("BLACKBOARD_URL", "http://localhost:9700")
 
 mcp = FastMCP(
     "WOPR UniFi Network Defense",
-    port=9600,
-    host="127.0.0.1",
+    port=int(os.environ.get("MCP_PORT", "9600")),
+    host=os.environ.get("MCP_HOST", "0.0.0.0"),
 )
 
 

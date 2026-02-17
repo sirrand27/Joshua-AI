@@ -34,7 +34,7 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
     runtime: nvidia
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -111,15 +111,15 @@ services:
       - logs:/data/logs
       - ./wopr:/app:ro
     environment:
-      - DEVICE_DB_PATH=${DEVICE_DB_PATH:-/data/wopr/wopr_devices.db}
-      - TRAINING_DATA_DIR=${TRAINING_DATA_DIR:-/data/wopr/training_data}
-      - LOG_FILE=${LOG_FILE:-/data/logs/wopr.log}
+      - WOPR_DEVICE_DB=${DEVICE_DB_PATH:-/data/wopr/wopr_devices.db}
+      - WOPR_TRAINING_DIR=${TRAINING_DATA_DIR:-/data/wopr/training_data}
+      - JOSHUA_LOG_FILE=${LOG_FILE:-/data/logs/wopr.log}
       - BLACKBOARD_URL=http://blackboard:9700
       - UNIFI_MCP_URL=http://unifi-mcp:9600
-      - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=${WOPR_MODEL:-joshua:cybersec}
-      - VOICE_HOST=voice
-      - VOICE_PORT=9876
+      - JOSHUA_OLLAMA_URL=http://ollama:11434
+      - JOSHUA_MODEL=${WOPR_MODEL:-joshua:cybersec}
+      - JOSHUA_VOICE_HOST=voice
+      - JOSHUA_VOICE_PORT=9876
       - FLIPPER_MCP_URL=${FLIPPER_MCP_URL:-}
     depends_on:
       ollama:
@@ -129,11 +129,11 @@ services:
       unifi-mcp:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
+      test: ["CMD-SHELL", "python -c \"import os,time; exit(0 if time.time()-os.path.getmtime('/data/logs/wopr.log')<120 else 1)\""]
       interval: 60s
       timeout: 15s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 
   # ─── Piper TTS (lightweight voice, CPU-only) ────────────
   voice:
