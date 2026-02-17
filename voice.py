@@ -83,7 +83,10 @@ class VoiceClient:
             return False
 
     def check_available(self):
-        """Check if voice server is reachable."""
+        """Check if voice server is reachable (respects VOICE_ENABLED config)."""
+        if not VOICE_ENABLED:
+            self.enabled = False
+            return False
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3)

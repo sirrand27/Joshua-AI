@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════╗
 # ║  W.O.P.R. LAUNCH SEQUENCE                   ║
-# ║  Starts W.O.P.R. sentry + all MCP services  ║
+# ║  Network defense sentry — voice + UniFi     ║
 # ╚══════════════════════════════════════════════╝
 
 DIR="$(dirname "$(readlink -f "$0")")"
@@ -32,46 +32,29 @@ echo "║     W.O.P.R. LAUNCH SEQUENCE        ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
-# 1. Ollama (systemd service)
-if systemctl is-active ollama >/dev/null 2>&1; then
-    echo "[WOPR] Ollama LLM — already running"
-else
-    sudo systemctl start ollama
-    sleep 2
-    echo "[WOPR] Ollama LLM — ONLINE"
-fi
-
-# 2. Blackboard MCP (port 9700)
+# 1. Blackboard MCP (port 9700)
 launch_service \
     "Blackboard MCP (:9700)" \
     "python3.*blackboard.*server.py" \
     "cd '$PENTEST_DIR/blackboard' && python3 server.py" \
     "$LOG_DIR/blackboard_server.log"
 
-# 3. Blackboard Monitor GUI
-if ! pgrep -f "monitor.py" >/dev/null 2>&1; then
-    export DISPLAY="${DISPLAY:-:0.0}"
-    cd "$PENTEST_DIR/blackboard" && python3 monitor.py &>/dev/null &
-    echo "[WOPR] Blackboard Monitor — ONLINE"
+# 2. Joshua Voice Server (port 9876)
+if systemctl --user is-active joshua-voice >/dev/null 2>&1; then
+    echo "[WOPR] Joshua Voice (:9876) — already running"
 else
-    echo "[WOPR] Blackboard Monitor — already running"
+    systemctl --user start joshua-voice 2>/dev/null || echo "[WOPR] Joshua Voice (:9876) — no service (manual start needed)"
+    echo "[WOPR] Joshua Voice (:9876) — ONLINE"
 fi
 
-# 4. UniFi MCP (port 9600)
+# 3. UniFi MCP (port 9600)
 launch_service \
     "UniFi MCP (:9600)" \
     "python3.*unifi_mcp.*server.py" \
     "cd '$PENTEST_DIR/unifi_mcp' && bash run.sh" \
     "$LOG_DIR/unifi_mcp.log"
 
-# 5. Joshua Voice Server (port 9876)
-if systemctl --user is-active joshua-voice >/dev/null 2>&1; then
-    echo "[WOPR] Joshua Voice (:9876) — already running"
-else
-    systemctl --user start joshua-voice 2>/dev/null || echo "[WOPR] Joshua Voice (:9876) — no service (manual start needed)"
-fi
-
-# 6. W.O.P.R. Sentry Agent
+# 4. W.O.P.R. Sentry Agent
 launch_service \
     "W.O.P.R. Sentry" \
     "python3.*local_joshua.*agent.py" \
@@ -80,7 +63,7 @@ launch_service \
 
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   W.O.P.R. ONLINE — ALL SYSTEMS GO  ║"
+echo "║   W.O.P.R. ONLINE — SENTRY ACTIVE   ║"
 echo "╚══════════════════════════════════════╝"
 
 # Keep terminal open if launched from desktop

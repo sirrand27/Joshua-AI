@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/Joshua-AI
 Environment=JOSHUA_OLLAMA_URL=http://localhost:11434
-Environment=JOSHUA_MODEL=joshua:latest
+Environment=JOSHUA_MODEL=joshua:cybersec
 Environment=BLACKBOARD_URL=http://localhost:9700
 Environment=COURT_RECORDS_URL=http://localhost:9800
 Environment=JOSHUA_VOICE_HOST=localhost

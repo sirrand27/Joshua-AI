@@ -1,9 +1,13 @@
 """
 Local Joshua AI Agent — Learning Module
 Auto-generates training examples from each interaction.
+Includes TrainingPipeline for fine-tuning loop closure.
 """
 
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from blackboard import BlackboardClient
@@ -102,3 +106,121 @@ class LearningEngine:
     @property
     def pending_count(self):
         return len(self._pending)
+
+
+class TrainingPipeline:
+    """Export → Adapt → Train pipeline for W.O.P.R. fine-tuning.
+
+    Stages:
+    1. Export training data from Blackboard → JSONL
+    2. Adapt system messages from generic to W.O.P.R. persona
+    3. Train (manual or automated LoRA fine-tune)
+    4. Swap model in Ollama config
+    """
+
+    def __init__(self, blackboard):
+        from config import (TRAINING_DATA_DIR, MIN_TRAINING_EXAMPLES,
+                           SYSTEM_PROMPT, AGENT_NAME)
+        self.blackboard = blackboard
+        self.data_dir = TRAINING_DATA_DIR
+        self.min_examples = MIN_TRAINING_EXAMPLES
+        self.system_prompt = SYSTEM_PROMPT
+        self.agent_name = AGENT_NAME
+        os.makedirs(self.data_dir, exist_ok=True)
+
+    def export_training_data(self):
+        """Export training examples from Blackboard to JSONL file.
+        Returns (filepath, count) or (None, 0) on failure."""
+        try:
+            result = self.blackboard._mcp_call("get_training_data", {
+                "format": "finetuning"
+            })
+        except Exception as e:
+            logger.error(f"Training data export failed: {e}")
+            return None, 0
+
+        if not result:
+            logger.warning("No training data returned from Blackboard")
+            return None, 0
+
+        # result should be a list of training examples
+        examples = result if isinstance(result, list) else result.get("examples", [])
+
+        if len(examples) < self.min_examples:
+            logger.info(f"Only {len(examples)} examples (need {self.min_examples}). Skipping export.")
+            return None, len(examples)
+
+        # Write JSONL
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(self.data_dir, f"wopr_training_{timestamp}.jsonl")
+
+        count = 0
+        with open(filepath, "w", encoding="utf-8") as f:
+            for ex in examples:
+                adapted = self._adapt_example(ex)
+                if adapted:
+                    f.write(json.dumps(adapted, ensure_ascii=False) + "\n")
+                    count += 1
+
+        logger.info(f"Exported {count} training examples to {filepath}")
+        return filepath, count
+
+    def _adapt_example(self, example):
+        """Rewrite a training example with W.O.P.R. system prompt and persona."""
+        if not isinstance(example, dict):
+            return None
+
+        # Build conversation format for fine-tuning
+        context = example.get("context", "")
+        reasoning = example.get("reasoning", "")
+        action = example.get("action", "")
+        observation = example.get("observation", "")
+        conclusion = example.get("conclusion", "")
+
+        # Construct user message (the query/situation)
+        user_msg = context
+        if not user_msg:
+            return None
+
+        # Construct assistant response (what WOPR should say)
+        parts = []
+        if reasoning:
+            parts.append(reasoning)
+        if action:
+            parts.append(f"Action: {action}")
+        if observation:
+            parts.append(observation)
+        if conclusion:
+            parts.append(conclusion)
+        assistant_msg = " ".join(parts)
+
+        if not assistant_msg:
+            return None
+
+        return {
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": assistant_msg},
+            ]
+        }
+
+    def get_status(self):
+        """Get training pipeline status."""
+        files = []
+        if os.path.isdir(self.data_dir):
+            files = [f for f in os.listdir(self.data_dir) if f.endswith(".jsonl")]
+
+        total_examples = 0
+        for f in files:
+            path = os.path.join(self.data_dir, f)
+            with open(path) as fh:
+                total_examples += sum(1 for _ in fh)
+
+        return {
+            "data_dir": self.data_dir,
+            "export_files": len(files),
+            "total_examples": total_examples,
+            "min_required": self.min_examples,
+            "ready_to_train": total_examples >= self.min_examples,
+        }

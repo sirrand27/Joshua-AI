@@ -4,6 +4,12 @@ __pycache__/
 *.egg-info/
 .env
 *.db
+*.db-shm
+*.db-wal
 *.log
+*.gguf
 .venv/
 venv/
+training_data/
+wopr_lora/
+unsloth_compiled_cache/

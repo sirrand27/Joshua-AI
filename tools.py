@@ -6,6 +6,7 @@ Subprocess wrappers for OSINT tools and HTTP clients for MCP services.
 import json
 import logging
 import subprocess
+import threading
 import urllib.request
 import urllib.error
 
@@ -186,7 +187,7 @@ def _mcp_init_session(base_url, timeout=10):
     return None
 
 
-def _mcp_call(base_url, tool_name, arguments=None, timeout=15):
+def _mcp_call(base_url, tool_name, arguments=None, timeout=15, _retry=True):
     """Generic MCP tool call via streamable-http POST."""
     # Ensure session for servers that require it (UniFi MCP)
     session_id = _mcp_sessions.get(base_url)
@@ -232,9 +233,9 @@ def _mcp_call(base_url, tool_name, arguments=None, timeout=15):
             return f"[ERROR] MCP {tool_name}: no result in response"
     except Exception as e:
         # Session expired — clear and retry once
-        if session_id and "400" in str(e):
+        if _retry and session_id and "400" in str(e):
             _mcp_sessions.pop(base_url, None)
-            return _mcp_call(base_url, tool_name, arguments, timeout)
+            return _mcp_call(base_url, tool_name, arguments, timeout, _retry=False)
         return f"[ERROR] MCP {tool_name}: {e}"
 
 
@@ -303,6 +304,79 @@ def unifi_kick_client(mac):
 def flipper_call(tool_name, arguments=None):
     """Call a Flipper Zero MCP tool."""
     return _mcp_call(FLIPPER_MCP_URL, tool_name, arguments, timeout=30)
+
+
+# === Device Knowledge Base ===
+
+_device_db = None  # Lazy singleton
+_device_db_lock = threading.Lock()
+
+
+def _get_device_db():
+    """Get or create the DeviceKnowledgeBase singleton (thread-safe)."""
+    global _device_db
+    if _device_db is None:
+        with _device_db_lock:
+            if _device_db is None:  # Double-checked locking
+                from device_db import DeviceKnowledgeBase
+                _device_db = DeviceKnowledgeBase()
+    return _device_db
+
+
+def device_db_query(query_type, **kwargs):
+    """Query the W.O.P.R. device knowledge base.
+
+    Supports query types:
+        lookup    — search devices by name (hostname)
+        timeline  — connection history for a MAC
+        correlate — find devices connecting at similar times
+        anomalies — response action / alert history for a MAC
+    """
+    try:
+        db = _get_device_db()
+
+        if query_type == "lookup":
+            name = kwargs.get("name", "")
+            if not name:
+                return json.dumps({"error": "lookup requires 'name' parameter"})
+            result = db.get_device_by_name(name)
+        elif query_type == "timeline":
+            mac = kwargs.get("mac", "")
+            if not mac:
+                return json.dumps({"error": "timeline requires 'mac' parameter"})
+            result = db.get_device_timeline(mac, kwargs.get("hours", 24))
+        elif query_type == "correlate":
+            mac = kwargs.get("mac", "")
+            if not mac:
+                return json.dumps({"error": "correlate requires 'mac' parameter"})
+            result = db.get_cross_device_correlation(mac, kwargs.get("window_minutes", 30))
+        elif query_type == "anomalies":
+            mac = kwargs.get("mac", "")
+            if not mac:
+                return json.dumps({"error": "anomalies requires 'mac' parameter"})
+            result = db.get_anomaly_history(mac, kwargs.get("days", 7))
+        elif query_type == "trust_history":
+            mac = kwargs.get("mac", "")
+            if not mac:
+                return json.dumps({"error": "trust_history requires 'mac' parameter"})
+            result = db.get_trust_history(mac, kwargs.get("days", 30))
+        else:
+            return json.dumps({
+                "error": f"Unknown query_type: {query_type}. "
+                         "Use: lookup|timeline|correlate|anomalies|trust_history"
+            })
+
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"device_db_query failed: {query_type} — {e}")
+        return json.dumps({"error": f"device_db_query failed: {e}"})
+
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 
 # === Tool Registry ===
@@ -436,6 +510,27 @@ TOOL_REGISTRY = {
         "fn": lambda args: flipper_call(args.get("tool", ""), args.get("arguments", {})),
         "description": "Call any Flipper Zero MCP tool (SubGHz, NFC, RFID, IR, GPIO, BadUSB, WiFi)",
         "params": ["tool", "arguments?"]
+    },
+    # Device Knowledge Base
+    "device_db_query": {
+        "fn": lambda args: device_db_query(
+            args.get("query_type", ""),
+            name=args.get("name", ""),
+            mac=args.get("mac", ""),
+            hours=_safe_int(args.get("hours", 24), 24),
+            window_minutes=_safe_int(args.get("window_minutes", 30), 30),
+            days=_safe_int(args.get("days", 7), 7),
+        ),
+        "description": "Query W.O.P.R. device knowledge base. Types: lookup (by name), timeline (connection history), correlate (cross-device), anomalies (response history), trust_history (trust level changes)",
+        "params": ["query_type", "name?", "mac?", "hours?", "window_minutes?", "days?"],
+        "args": {
+            "query_type": "str — lookup|timeline|correlate|anomalies|trust_history",
+            "name": "str (for lookup)",
+            "mac": "str (for timeline/correlate/anomalies)",
+            "hours": "int (for timeline, default 24)",
+            "window_minutes": "int (for correlate, default 30)",
+            "days": "int (for anomalies, default 7)",
+        },
     },
 }
 
