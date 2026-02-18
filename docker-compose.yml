@@ -125,6 +125,7 @@ services:
       - FLIPPER_MCP_URL=${FLIPPER_MCP_URL:-}
       - WOPR_MARAUDER_ENABLED=${MARAUDER_ENABLED:-false}
       - WOPR_MARAUDER_DEVICE=${MARAUDER_DEVICE:-/dev/ttyACM0}
+      - WOPR_PUBLIC_POOL_URL=${PUBLIC_POOL_URL:-http://192.168.100.80:2019}
     depends_on:
       ollama:
         condition: service_healthy

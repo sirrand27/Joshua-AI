@@ -25,20 +25,30 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# Serial output parsers
+# Serial output parsers — matched to actual ESP32 Marauder output format
+# scanap: "-38 Ch: 9 BSSID: 9c:05:d6:37:44:a4 ESSID: SlipStream2.4"
 _RE_SCANAP = re.compile(
-    r'SSID:\s*(.+?)\s{2,}BSSID:\s*([0-9a-fA-F:]{17})\s+'
-    r'Ch:\s*(\d+)\s+RSSI:\s*(-?\d+)\s+Enc:\s*(\S+)'
+    r'(-?\d+)\s+Ch:\s*(\d+)\s+BSSID:\s*([0-9a-fA-F:]{17})\s+ESSID:\s*(.*)'
 )
-_RE_DEAUTH = re.compile(
+# sniffdeauth: "Deauth: AA:BB:CC:DD:EE:FF -> 11:22:33:44:55:66 Reason: N Type: N"
+# Also captures: "Type: Deauth Src: AA:BB:CC:DD:EE:FF Dst: 11:22:33:44:55:66"
+_RE_DEAUTH_V1 = re.compile(
+    r'Deauth:\s*([0-9a-fA-F:]{17})\s*->\s*([0-9a-fA-F:]{17})'
+)
+_RE_DEAUTH_V2 = re.compile(
     r'Src:\s*([0-9a-fA-F:]{17})\s+Dst:\s*([0-9a-fA-F:]{17})'
 )
+# Bare MAC line during deauth sniff (actual deauth frame capture)
+_RE_DEAUTH_MAC = re.compile(
+    r'^([0-9a-fA-F:]{17})$'
+)
 _RE_PROBE = re.compile(
-    r'Src:\s*([0-9a-fA-F:]{17}).*?SSID:\s*(.+)'
+    r'Src:\s*([0-9a-fA-F:]{17}).*?(?:SSID|ESSID):\s*(.*)'
 )
 # Status lines to ignore (not data)
 _IGNORE_PREFIXES = (
     "Starting", "Stopping", "ESP32 Marauder", "By:", "---", "> ",
+    "Beacon:", "Failed to set", "#",
 )
 
 
@@ -235,17 +245,16 @@ class MarauderMonitor:
     # ── Line Parsers ───────────────────────────────────────
 
     def _parse_scanap_line(self, line):
-        """Parse scanap output: SSID, BSSID, channel, RSSI, encryption."""
+        """Parse scanap output: RSSI, channel, BSSID, ESSID."""
         m = _RE_SCANAP.search(line)
         if not m:
             return
 
         ap = {
-            "ssid": m.group(1).strip(),
-            "bssid": m.group(2).lower(),
-            "channel": int(m.group(3)),
-            "rssi": int(m.group(4)),
-            "enc": m.group(5),
+            "ssid": m.group(4).strip(),
+            "bssid": m.group(3).lower(),
+            "channel": int(m.group(2)),
+            "rssi": int(m.group(1)),
         }
 
         self._ap_scan_buffer.append(ap)
@@ -263,7 +272,6 @@ class MarauderMonitor:
                 "ssid": ap["ssid"],
                 "channel": ap["channel"],
                 "rssi": ap["rssi"],
-                "enc": ap["enc"],
                 "first_seen": now,
                 "last_seen": now,
                 "count": 1,
@@ -271,7 +279,7 @@ class MarauderMonitor:
 
     def _parse_deauth_line(self, line):
         """Parse sniffdeauth output: source MAC, destination MAC."""
-        m = _RE_DEAUTH.search(line)
+        m = _RE_DEAUTH_V1.search(line) or _RE_DEAUTH_V2.search(line)
         if not m:
             return
 

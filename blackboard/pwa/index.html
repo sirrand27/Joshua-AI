@@ -444,23 +444,6 @@
       border-radius: 0;
     }
 
-    #sendBtn {
-      background: var(--fg);
-      color: var(--bg);
-      border: none;
-      font-family: var(--font);
-      font-weight: bold;
-      font-size: 14px;
-      padding: 4px 14px;
-      cursor: pointer;
-      margin-left: auto;
-      border-radius: 0;
-    }
-
-    #sendBtn:active {
-      background: var(--fg-bright);
-    }
-
     #msgInput {
       background: var(--bg);
       color: var(--fg-bright);
@@ -676,7 +659,6 @@
           <option value="alert">ALERT</option>
         </select>
       </label>
-      <button id="sendBtn">[ SEND ]</button>
     </div>
     <textarea id="msgInput" rows="1" placeholder="Enter directive..." enterkeyhint="send"></textarea>
   </section>
@@ -697,7 +679,7 @@ const LAYOUT_KEY = 'blackboard_layout_v1';
 function saveLayout() {
   const dashboard = document.getElementById('dashboard');
   const topRow = document.getElementById('topRow');
-  const taskPane = document.getElementById('taskPane');
+  const taskPane = document.getElementById('defensePane');
 
   const layout = {
     topRatio: topRow.offsetHeight / dashboard.offsetHeight,
@@ -718,7 +700,7 @@ function applyLayout() {
   const layout = loadLayout();
   const dashboard = document.getElementById('dashboard');
   const topRow = document.getElementById('topRow');
-  const taskPane = document.getElementById('taskPane');
+  const taskPane = document.getElementById('defensePane');
   const hHandle = document.getElementById('hHandle');
   const vHandle = document.getElementById('vHandle');
 
@@ -743,7 +725,7 @@ function applyLayout() {
 function initResize() {
   const dashboard = document.getElementById('dashboard');
   const topRow = document.getElementById('topRow');
-  const taskPane = document.getElementById('taskPane');
+  const taskPane = document.getElementById('defensePane');
   const hHandle = document.getElementById('hHandle');
   const vHandle = document.getElementById('vHandle');
 
@@ -1446,12 +1428,9 @@ async function sendMessage() {
 
   const to = document.getElementById('recipientSelect').value;
   const type = document.getElementById('typeSelect').value;
-  const btn = document.getElementById('sendBtn');
 
   input.value = '';
-  btn.textContent = '[ QUEUED ]';
-  btn.style.background = 'var(--medium)';
-  btn.style.color = 'var(--bg)';
+  input.placeholder = 'QUEUED...';
 
   try {
     const resp = await fetch('/api/send', {
@@ -1465,25 +1444,18 @@ async function sendMessage() {
       })
     });
     if (resp.ok) {
-      btn.textContent = '[ SENT ]';
-      btn.style.background = 'var(--fg-bright)';
+      input.placeholder = 'SENT';
       state.knownMsgIds.clear();
-      state.renderedMsgIds.clear(); // force full comms rebuild after send
+      state.renderedMsgIds.clear();
       pollDashboard();
     } else {
       throw new Error('Send failed');
     }
   } catch (e) {
-    btn.textContent = '[ FAIL ]';
-    btn.style.background = 'var(--critical)';
-    btn.style.color = 'var(--bg)';
+    input.placeholder = 'SEND FAILED';
   }
 
-  setTimeout(() => {
-    btn.textContent = '[ SEND ]';
-    btn.style.background = 'var(--fg)';
-    btn.style.color = 'var(--bg)';
-  }, 1500);
+  setTimeout(() => { input.placeholder = 'Enter directive...'; }, 1500);
 }
 
 // ── Event Bindings ─────────────────────────────
@@ -1492,10 +1464,8 @@ document.addEventListener('click', () => {
   if (audioCtx.state === 'suspended') audioCtx.resume();
 }, { once: true });
 
-document.getElementById('sendBtn').addEventListener('click', sendMessage);
-
 document.getElementById('msgInput').addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
   }
@@ -1534,7 +1504,7 @@ window.addEventListener('resize', () => {
   // Re-clamp pane sizes on window resize
   const dashboard = document.getElementById('dashboard');
   const topRow = document.getElementById('topRow');
-  const taskPane = document.getElementById('taskPane');
+  const taskPane = document.getElementById('defensePane');
   const hHandle = document.getElementById('hHandle');
   const vHandle = document.getElementById('vHandle');
 
