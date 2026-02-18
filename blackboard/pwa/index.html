@@ -622,6 +622,107 @@
       100% { box-shadow: inset 0 0 0 transparent; }
     }
     body.threat-flash { animation: threat-flash 1.5s ease-out; }
+
+    /* Auth overlay */
+    .auth-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #000;
+      z-index: 10001;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.5s ease;
+    }
+    .auth-overlay.fade-out { opacity: 0; }
+    .auth-title {
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 18px;
+      letter-spacing: 2px;
+      margin-bottom: 24px;
+      text-shadow: 0 0 10px var(--fg);
+    }
+    .auth-input {
+      background: var(--bg);
+      color: var(--fg-bright);
+      border: 1px solid var(--fg-dim);
+      font-family: var(--font);
+      font-size: 16px;
+      padding: 10px 14px;
+      width: 320px;
+      max-width: 80vw;
+      text-align: center;
+      letter-spacing: 1px;
+    }
+    .auth-input:focus { outline: 1px solid var(--fg); border-color: var(--fg); }
+    .auth-input::placeholder { color: var(--fg-dim); }
+    .auth-error {
+      color: var(--critical);
+      font-family: var(--font);
+      font-size: 13px;
+      margin-top: 10px;
+      height: 16px;
+    }
+    .auth-hint {
+      color: var(--fg-dim);
+      font-family: var(--font);
+      font-size: 11px;
+      margin-top: 16px;
+    }
+
+    /* DEFCON context line */
+    .defcon-context {
+      font-size: 10px;
+      letter-spacing: 1px;
+      margin-top: 2px;
+      color: var(--fg-dim);
+    }
+
+    /* Mining fleet type table */
+    .fleet-table {
+      width: 100%;
+      font-size: 11px;
+      border-collapse: collapse;
+      margin-top: 4px;
+    }
+    .fleet-table th {
+      color: var(--fg-dim);
+      font-weight: normal;
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      text-align: left;
+      padding: 1px 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .fleet-table td {
+      color: var(--fg-bright);
+      padding: 1px 6px;
+    }
+    .fleet-table td.fleet-type { color: var(--accent); text-transform: uppercase; }
+    .pool-status { font-size: 11px; padding: 2px 8px; }
+    .pool-dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .pool-dot.online { background: var(--fg); box-shadow: 0 0 4px var(--fg); }
+    .pool-dot.offline { background: var(--critical); box-shadow: 0 0 4px var(--critical); }
+
+    /* Title bar lock icon */
+    .title-lock {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      cursor: pointer;
+      color: var(--fg-dim);
+      font-size: 14px;
+    }
+    .title-lock:hover { color: var(--fg-bright); }
   </style>
 </head>
 <body>
@@ -629,6 +730,14 @@
   <!-- CRT Scanline Overlay -->
   <div class="crt-overlay"></div>
   <div class="defcon-tint tint-5" id="defconTint"></div>
+
+  <!-- Auth Overlay -->
+  <div class="auth-overlay" id="authOverlay" style="display:none;">
+    <div class="auth-title">[ BLACKBOARD // ACCESS CONTROL ]</div>
+    <input type="password" class="auth-input" id="authInput" placeholder="ENTER API KEY" autocomplete="off" spellcheck="false">
+    <div class="auth-error" id="authError"></div>
+    <div class="auth-hint">AUTHORIZATION REQUIRED</div>
+  </div>
 
   <!-- Boot Overlay -->
   <div class="boot-overlay" id="bootOverlay">
@@ -639,7 +748,7 @@
   <audio id="defconAlert" preload="auto" src="defcon.wav"></audio>
 
   <!-- Title Bar -->
-  <header class="title-bar">[ BLACKBOARD // MISSION CONTROL ]</header>
+  <header class="title-bar">[ BLACKBOARD // MISSION CONTROL ]<span class="title-lock" id="lockBtn" title="Logout / clear API key">&#x1f512;</span></header>
 
   <!-- Connection Status -->
   <span class="conn-status conn-ok" id="connStatus">ONLINE</span>
@@ -677,6 +786,7 @@
             <span class="defcon-label">DEFCON</span>
             <span class="defcon-level" id="defconLevel">5</span>
             <span class="defcon-desc" id="defconDesc">PEACEFUL</span>
+            <span class="defcon-context" id="defconContext"></span>
           </div>
 
           <div class="defense-section">
@@ -761,10 +871,12 @@
                 <span class="defense-stat-value" id="mTemp">--</span>
               </div>
               <div class="defense-stat">
-                <span class="defense-stat-label">THROTTLED</span>
-                <span class="defense-stat-value" id="mThrottled">0</span>
+                <span class="defense-stat-label">BEST DIFF</span>
+                <span class="defense-stat-value" id="mBestDiff">--</span>
               </div>
             </div>
+            <div id="fleetTypeTable" style="padding: 0 8px 4px;"></div>
+            <div class="pool-status" id="mPoolStatus"></div>
           </div>
 
         </div>
@@ -822,6 +934,20 @@
   </section>
 
 <script>
+// ── API Key Auth ──────────────────────────────
+function getApiKey() { return localStorage.getItem('bb_key') || ''; }
+function setApiKey(k) { localStorage.setItem('bb_key', k); }
+function clearApiKey() { localStorage.removeItem('bb_key'); }
+
+function authFetch(url, opts = {}) {
+  const key = getApiKey();
+  if (key) {
+    opts.headers = opts.headers || {};
+    opts.headers['Authorization'] = 'Bearer ' + key;
+  }
+  return fetch(url, opts);
+}
+
 // ── State ──────────────────────────────────────
 const state = {
   knownMsgIds: new Set(),
@@ -1175,7 +1301,7 @@ let defenseData = null;
 
 async function pollDefenseStatus() {
   try {
-    const resp = await fetch('/api/defense-status');
+    const resp = await authFetch('/api/defense-status');
     if (!resp.ok) return;
     const data = await resp.json();
     defenseData = data.wopr || data[Object.keys(data)[0]] || null;
@@ -1195,6 +1321,35 @@ function renderDefenseStatus(d) {
   // DEFCON screen tint
   const tint = document.getElementById('defconTint');
   if (tint) tint.className = 'defcon-tint tint-' + level;
+
+  // DEFCON context — explain WHY the current level
+  const ctxEl = document.getElementById('defconContext');
+  if (ctxEl) {
+    const threats = d.threats || [];
+    const diag = d.diagnostics || {};
+    const anomalies = d.recent_anomalies || [];
+    let ctx = '';
+    if (level === 1) {
+      const blocked = threats.filter(t => t.posture === 'BLOCK').length;
+      ctx = blocked + ' DEVICE' + (blocked !== 1 ? 'S' : '') + ' BLOCKED';
+    } else if (level === 2) {
+      const isolated = threats.filter(t => t.posture === 'ISOLATE').length;
+      ctx = isolated + ' DEVICE' + (isolated !== 1 ? 'S' : '') + ' ISOLATED';
+    } else if (level === 3) {
+      const alerted = threats.filter(t => t.posture === 'ALERT').length;
+      ctx = alerted + ' DEVICE' + (alerted !== 1 ? 'S' : '') + ' AT ALERT';
+    } else if (level === 4) {
+      const subs = diag.degraded_subsystems || [];
+      ctx = 'DEGRADED: ' + (subs.length ? subs.join(', ').toUpperCase() : 'SUBSYSTEM');
+    } else {
+      ctx = 'ALL SYSTEMS NOMINAL';
+    }
+    if (anomalies.length > 0) {
+      ctx += ' \u2502 ' + anomalies.length + ' RECENT ANOMAL' + (anomalies.length !== 1 ? 'IES' : 'Y');
+    }
+    ctxEl.textContent = ctx;
+    ctxEl.style.color = level <= 2 ? 'var(--critical)' : level === 3 ? 'var(--medium)' : '';
+  }
 
   // Perimeter
   const p = d.perimeter || {};
@@ -1286,9 +1441,42 @@ function renderDefenseStatus(d) {
     document.getElementById('mHashrate').textContent = formatHashrate(m.total_hashrate || 0);
   }
   document.getElementById('mTemp').textContent = m.avg_temp ? m.avg_temp.toFixed(1) + 'C' : '--';
-  const thrEl = document.getElementById('mThrottled');
-  thrEl.textContent = m.throttled || 0;
-  thrEl.style.color = (m.throttled || 0) > 0 ? 'var(--medium)' : 'var(--fg-bright)';
+
+  // Best difficulty
+  const bestDiff = m.best_difficulty || 0;
+  const bdEl = document.getElementById('mBestDiff');
+  if (bestDiff >= 1e9) bdEl.textContent = (bestDiff / 1e9).toFixed(2) + 'G';
+  else if (bestDiff >= 1e6) bdEl.textContent = (bestDiff / 1e6).toFixed(1) + 'M';
+  else if (bestDiff >= 1e3) bdEl.textContent = (bestDiff / 1e3).toFixed(1) + 'K';
+  else bdEl.textContent = bestDiff ? bestDiff.toFixed(0) : '--';
+
+  // Per-type breakdown table
+  const typeDiv = document.getElementById('fleetTypeTable');
+  const byType = m.by_type || {};
+  const typeKeys = Object.keys(byType);
+  if (typeKeys.length > 0) {
+    let html = '<table class="fleet-table"><tr><th>TYPE</th><th>UNITS</th><th>ONLINE</th><th>HASH/1H</th></tr>';
+    for (const type of typeKeys) {
+      const t = byType[type];
+      html += '<tr><td class="fleet-type">' + escapeHtml(type) + '</td>'
+            + '<td>' + (t.count || 0) + '</td>'
+            + '<td>' + (t.online || 0) + '</td>'
+            + '<td>' + formatHashrate(t.hashrate_1h || 0) + '</td></tr>';
+    }
+    html += '</table>';
+    typeDiv.innerHTML = html;
+  }
+
+  // Pool status
+  const poolEl = document.getElementById('mPoolStatus');
+  const poolDown = m.pool_api_down;
+  if (poolDown === true) {
+    poolEl.innerHTML = '<span class="pool-dot offline"></span>POOL OFFLINE';
+  } else if (poolDown === false) {
+    poolEl.innerHTML = '<span class="pool-dot online"></span>POOL CONNECTED';
+  } else {
+    poolEl.textContent = '';
+  }
 }
 
 function formatHashrate(ghps) {
@@ -1573,7 +1761,7 @@ let connOk = true;
 
 async function pollDashboard() {
   try {
-    const resp = await fetch('/api/dashboard');
+    const resp = await authFetch('/api/dashboard');
     if (!resp.ok) throw new Error(resp.status);
     const data = await resp.json();
 
@@ -1599,7 +1787,7 @@ async function pollDashboard() {
 async function catchUpActivity() {
   while (true) {
     try {
-      const resp = await fetch(`/api/activity?since=${state.lastActivityId}`);
+      const resp = await authFetch(`/api/activity?since=${state.lastActivityId}`);
       if (!resp.ok) break;
       const data = await resp.json();
       const hasData = data.data && data.data.trim();
@@ -1617,7 +1805,7 @@ async function pollActivity() {
   if (_activityPolling) return;
   _activityPolling = true;
   try {
-    const resp = await fetch(`/api/activity?since=${state.lastActivityId}`);
+    const resp = await authFetch(`/api/activity?since=${state.lastActivityId}`);
     if (!resp.ok) return;
     const data = await resp.json();
     if (data.data && data.data.trim()) appendActivity(data.data); // live mode — animates
@@ -1639,7 +1827,7 @@ async function sendMessage() {
   input.placeholder = 'QUEUED...';
 
   try {
-    const resp = await fetch('/api/send', {
+    const resp = await authFetch('/api/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1951,13 +2139,113 @@ async function bootSequence() {
   overlay.remove();
 }
 
+// ── Auth Overlay Logic ────────────────────────
+async function checkAuthAndBoot() {
+  const authOverlay = document.getElementById('authOverlay');
+  const bootOverlay = document.getElementById('bootOverlay');
+
+  // Test if auth is required by hitting the API
+  try {
+    const resp = await fetch('/api/dashboard');
+    if (resp.ok) {
+      // No auth required — go straight to boot
+      if (authOverlay) authOverlay.style.display = 'none';
+      await bootSequence();
+      startPolling();
+      initRadar();
+      return;
+    }
+    if (resp.status !== 401) {
+      // Some other error, try booting anyway
+      if (authOverlay) authOverlay.style.display = 'none';
+      await bootSequence();
+      startPolling();
+      initRadar();
+      return;
+    }
+  } catch (e) {
+    // Network error — try booting anyway
+    if (authOverlay) authOverlay.style.display = 'none';
+    await bootSequence();
+    startPolling();
+    initRadar();
+    return;
+  }
+
+  // Auth IS required. Check for stored key.
+  const storedKey = getApiKey();
+  if (storedKey) {
+    const testResp = await fetch('/api/dashboard', {
+      headers: { 'Authorization': 'Bearer ' + storedKey }
+    });
+    if (testResp.ok) {
+      // Stored key is valid
+      if (authOverlay) authOverlay.style.display = 'none';
+      await bootSequence();
+      startPolling();
+      initRadar();
+      return;
+    }
+    // Stored key is invalid — clear it
+    clearApiKey();
+  }
+
+  // Show auth overlay, hide boot overlay until auth succeeds
+  if (bootOverlay) bootOverlay.style.display = 'none';
+  if (authOverlay) authOverlay.style.display = 'flex';
+
+  const authInput = document.getElementById('authInput');
+  const authError = document.getElementById('authError');
+
+  authInput.focus();
+  authInput.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter') return;
+    const key = authInput.value.trim();
+    if (!key) return;
+    authError.textContent = 'AUTHENTICATING...';
+    authError.style.color = 'var(--fg-dim)';
+
+    try {
+      const resp = await fetch('/api/dashboard', {
+        headers: { 'Authorization': 'Bearer ' + key }
+      });
+      if (resp.ok) {
+        setApiKey(key);
+        authError.textContent = 'ACCESS GRANTED';
+        authError.style.color = 'var(--fg)';
+        await sleep(500);
+        authOverlay.classList.add('fade-out');
+        await sleep(500);
+        authOverlay.remove();
+        if (bootOverlay) bootOverlay.style.display = 'flex';
+        await bootSequence();
+        startPolling();
+        initRadar();
+      } else {
+        authError.textContent = 'ACCESS DENIED';
+        authError.style.color = 'var(--critical)';
+        authInput.value = '';
+        authInput.focus();
+      }
+    } catch (err) {
+      authError.textContent = 'CONNECTION FAILED';
+      authError.style.color = 'var(--critical)';
+    }
+  });
+}
+
+// Lock button — clear API key and reload
+document.getElementById('lockBtn').addEventListener('click', () => {
+  if (confirm('Clear API key and logout?')) {
+    clearApiKey();
+    location.reload();
+  }
+});
+
 // ── Boot ───────────────────────────────────────
 initResize();
 initScrollTracking();
-bootSequence().then(() => {
-  startPolling();
-  initRadar();
-});
+checkAuthAndBoot();
 </script>
 </body>
 </html>

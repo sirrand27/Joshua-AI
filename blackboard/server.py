@@ -9,6 +9,7 @@ Start: python3 server.py
 """
 
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,25 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import database as db
 from training import export_training_jsonl, export_finetuning_jsonl
+
+# ── API Key Authentication ───────────────────────────────
+_API_KEY = os.environ.get("BLACKBOARD_API_KEY", "").strip()
+
+if _API_KEY:
+    print(f"[BLACKBOARD] API key auth ENABLED (key: {_API_KEY[:4]}...{_API_KEY[-4:]})")
+else:
+    print("[BLACKBOARD] API key auth DISABLED (set BLACKBOARD_API_KEY to enable)")
+
+
+def _check_auth(request) -> "JSONResponse | None":
+    """Check API key from Authorization header. Returns 401 if invalid, None if OK."""
+    if not _API_KEY:
+        return None  # Auth disabled — open access
+    auth = request.headers.get("authorization", "")
+    if auth == f"Bearer {_API_KEY}" or auth == _API_KEY:
+        return None  # Valid key
+    from starlette.responses import JSONResponse as _JR
+    return _JR({"error": "Unauthorized", "hint": "Set Authorization: Bearer <key>"}, status_code=401)
 
 
 @asynccontextmanager
@@ -337,6 +357,8 @@ from starlette.responses import JSONResponse, StreamingResponse
 @mcp.custom_route("/api/dashboard", methods=["GET"])
 async def dashboard_api(request: Request) -> JSONResponse:
     """Return full dashboard state as JSON for remote monitors."""
+    denied = _check_auth(request)
+    if denied: return denied
     mission = db.get_active_mission()
     if not mission:
         return JSONResponse({"mission": None, "tasks": [], "messages": [], "findings": {}, "stats": {}})
@@ -377,6 +399,8 @@ async def dashboard_api(request: Request) -> JSONResponse:
 @mcp.custom_route("/api/send", methods=["POST"])
 async def send_api(request: Request) -> JSONResponse:
     """Allow remote operator to send messages via HTTP POST."""
+    denied = _check_auth(request)
+    if denied: return denied
     body = await request.json()
     mission = db.get_active_mission()
     if not mission:
@@ -396,10 +420,9 @@ async def send_api(request: Request) -> JSONResponse:
 
 @mcp.custom_route("/api/activity", methods=["GET"])
 async def activity_api(request: Request) -> JSONResponse:
-    """Serve activity log for remote monitors.
-    Uses DB-backed activity_log table so both agents' entries are visible.
-    Also merges legacy flat file entries.
-    ?since=ID for incremental reads (now uses row IDs, not byte offsets)."""
+    """Serve activity log for remote monitors."""
+    denied = _check_auth(request)
+    if denied: return denied
     since_id = int(request.query_params.get("since", 0))
     entries = db.get_activity(since_id, limit=300)
 
@@ -458,6 +481,8 @@ async def activity_api(request: Request) -> JSONResponse:
 @mcp.custom_route("/api/defense-status", methods=["GET"])
 async def defense_status_api(request: Request) -> JSONResponse:
     """Return latest defense status for all agents (consumed by Network Defense pane)."""
+    denied = _check_auth(request)
+    if denied: return denied
     statuses = db.get_defense_status()
     result = {}
     for s in statuses:
@@ -473,6 +498,8 @@ async def defense_status_api(request: Request) -> JSONResponse:
 @mcp.custom_route("/api/inbox", methods=["GET"])
 async def inbox_api(request: Request) -> JSONResponse:
     """Quick unread message count check. Usage: /api/inbox?agent=joshua"""
+    denied = _check_auth(request)
+    if denied: return denied
     agent_name = request.query_params.get("agent", "")
     if not agent_name:
         return JSONResponse({"error": "?agent= required"}, status_code=400)
@@ -526,11 +553,16 @@ if _pwa_dir.exists():
         if file_path.exists() and file_path.is_file() and _pwa_dir in file_path.resolve().parents:
             suffix = file_path.suffix.lower()
             ct = _pwa_content_types.get(suffix, "application/octet-stream")
-            return FileResponse(str(file_path), media_type=ct)
+            resp = FileResponse(str(file_path), media_type=ct)
+            if suffix in (".html", ".js"):
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
         # Fallback: serve index.html for SPA routing
         index = _pwa_dir / "index.html"
         if index.exists():
-            return FileResponse(str(index), media_type="text/html")
+            resp = FileResponse(str(index), media_type="text/html")
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
         return StarletteResponse("Not Found", status_code=404)
 
 

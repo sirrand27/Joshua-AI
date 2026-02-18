@@ -6,6 +6,7 @@ Uses SSE (Server-Sent Events) transport per MCP protocol.
 
 import json
 import logging
+import os
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ class BlackboardClient:
 
     def __init__(self, base_url=None):
         self.base_url = (base_url or BLACKBOARD_URL).rstrip("/")
+        self.api_key = os.environ.get("BLACKBOARD_API_KEY", "")
         self._last_check = None
 
     def _mcp_call(self, tool_name, arguments, timeout=15):
@@ -44,13 +46,13 @@ class BlackboardClient:
         }
 
         body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url, data=body, method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
-            }
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
 
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:

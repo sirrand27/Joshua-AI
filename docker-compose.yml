@@ -59,6 +59,7 @@ services:
       - BLACKBOARD_HOST=0.0.0.0
       - BLACKBOARD_PORT=9700
       - BLACKBOARD_DB_PATH=/data/blackboard/blackboard.db
+      - BLACKBOARD_API_KEY=${BLACKBOARD_API_KEY:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9700/health', timeout=5)"]
       interval: 30s
@@ -126,6 +127,7 @@ services:
       - WOPR_MARAUDER_ENABLED=${MARAUDER_ENABLED:-false}
       - WOPR_MARAUDER_DEVICE=${MARAUDER_DEVICE:-/dev/ttyACM0}
       - WOPR_PUBLIC_POOL_URL=${PUBLIC_POOL_URL:-http://192.168.100.80:2019}
+      - BLACKBOARD_API_KEY=${BLACKBOARD_API_KEY:-}
     depends_on:
       ollama:
         condition: service_healthy
