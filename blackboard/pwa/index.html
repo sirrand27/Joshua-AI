@@ -518,9 +518,122 @@
     body.resizing * { cursor: inherit !important; }
     body.resize-col { cursor: col-resize !important; }
     body.resize-row { cursor: row-resize !important; }
+
+    /* ── WarGames CRT Effects ───────────────────── */
+    .crt-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      z-index: 999;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.12) 0px,
+        rgba(0, 0, 0, 0.12) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+    }
+    .crt-overlay::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.35) 100%);
+    }
+
+    /* DEFCON screen tint */
+    .defcon-tint {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      z-index: 998;
+      transition: background-color 2s ease, opacity 2s ease;
+      opacity: 0.05;
+    }
+    .defcon-tint.tint-5 { background-color: #00ff41; }
+    .defcon-tint.tint-4 { background-color: #00ccff; }
+    .defcon-tint.tint-3 { background-color: #ffcc00; opacity: 0.08; }
+    .defcon-tint.tint-2 { background-color: #ff8800; opacity: 0.10; }
+    .defcon-tint.tint-1 { background-color: #ff0000; opacity: 0.12; animation: tint-pulse 2s ease-in-out infinite; }
+    @keyframes tint-pulse { 0%,100% { opacity: 0.12; } 50% { opacity: 0.04; } }
+
+    /* Enhanced DEFCON glow */
+    .defcon-display .defcon-level {
+      text-shadow: 0 0 20px currentColor, 0 0 40px currentColor, 0 0 60px currentColor;
+      transition: color 1s ease, text-shadow 1s ease;
+    }
+    .defcon-1 .defcon-level {
+      text-shadow: 0 0 20px var(--critical), 0 0 40px var(--critical), 0 0 80px var(--critical), 0 0 120px var(--critical);
+    }
+    .defcon-2 .defcon-level {
+      text-shadow: 0 0 20px var(--high), 0 0 40px var(--high), 0 0 80px var(--high);
+    }
+
+    /* Section header glow */
+    .section-header { text-shadow: 0 0 8px rgba(51, 255, 102, 0.3); }
+    .defense-section-header { text-shadow: 0 0 8px rgba(0, 204, 255, 0.4); }
+
+    /* Radar */
+    .radar-container {
+      display: flex;
+      align-items: stretch;
+      padding: 4px 0;
+    }
+    .radar-canvas-wrap {
+      width: 160px;
+      height: 160px;
+      flex-shrink: 0;
+      padding: 4px 4px 4px 8px;
+    }
+    #radarCanvas { width: 100%; height: 100%; display: block; }
+    .radar-stats {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 0 8px 0 4px;
+    }
+    .radar-stats .defense-grid { padding: 0; }
+
+    /* Boot overlay */
+    .boot-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #000;
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 1s ease;
+    }
+    .boot-overlay.fade-out { opacity: 0; }
+    .boot-text {
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 15px;
+      white-space: pre;
+      text-align: left;
+      text-shadow: 0 0 10px var(--fg), 0 0 20px rgba(0, 255, 65, 0.3);
+      line-height: 1.5;
+    }
+
+    /* Threat flash */
+    @keyframes threat-flash {
+      0% { box-shadow: inset 0 0 80px rgba(255, 0, 0, 0.3); }
+      100% { box-shadow: inset 0 0 0 transparent; }
+    }
+    body.threat-flash { animation: threat-flash 1.5s ease-out; }
   </style>
 </head>
 <body>
+
+  <!-- CRT Scanline Overlay -->
+  <div class="crt-overlay"></div>
+  <div class="defcon-tint tint-5" id="defconTint"></div>
+
+  <!-- Boot Overlay -->
+  <div class="boot-overlay" id="bootOverlay">
+    <div class="boot-text" id="bootText"></div>
+  </div>
 
   <!-- DEFCON Alert Audio -->
   <audio id="defconAlert" preload="auto" src="defcon.wav"></audio>
@@ -597,30 +710,37 @@
 
           <div class="defense-section">
             <div class="defense-section-header">RF MONITOR <span id="rfScanIndicator" class="rf-scan-indicator"></span></div>
-            <div class="defense-grid rf-grid">
-              <div class="defense-stat">
-                <span class="defense-stat-label">STATUS</span>
-                <span class="defense-stat-value" id="rfStatus">OFFLINE</span>
+            <div class="radar-container">
+              <div class="radar-canvas-wrap">
+                <canvas id="radarCanvas" width="320" height="320"></canvas>
               </div>
-              <div class="defense-stat">
-                <span class="defense-stat-label">MODE</span>
-                <span class="defense-stat-value" id="rfMode">--</span>
-              </div>
-              <div class="defense-stat">
-                <span class="defense-stat-label">APs TRACKED</span>
-                <span class="defense-stat-value" id="rfAPs">--</span>
-              </div>
-              <div class="defense-stat">
-                <span class="defense-stat-label">DEAUTH</span>
-                <span class="defense-stat-value" id="rfDeauth">--</span>
-              </div>
-              <div class="defense-stat">
-                <span class="defense-stat-label">PROBE DEVICES</span>
-                <span class="defense-stat-value" id="rfProbes">--</span>
-              </div>
-              <div class="defense-stat">
-                <span class="defense-stat-label">PWNAGOTCHI</span>
-                <span class="defense-stat-value" id="rfPwnagotchi">CLEAR</span>
+              <div class="radar-stats">
+                <div class="defense-grid">
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">STATUS</span>
+                    <span class="defense-stat-value" id="rfStatus">OFFLINE</span>
+                  </div>
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">MODE</span>
+                    <span class="defense-stat-value" id="rfMode">--</span>
+                  </div>
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">APs</span>
+                    <span class="defense-stat-value" id="rfAPs">--</span>
+                  </div>
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">DEAUTH</span>
+                    <span class="defense-stat-value" id="rfDeauth">--</span>
+                  </div>
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">PROBES</span>
+                    <span class="defense-stat-value" id="rfProbes">--</span>
+                  </div>
+                  <div class="defense-stat">
+                    <span class="defense-stat-label">PWNA</span>
+                    <span class="defense-stat-value" id="rfPwnagotchi">CLEAR</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1072,6 +1192,10 @@ function renderDefenseStatus(d) {
   document.getElementById('defconDesc').textContent = defconDescs[level] || 'UNKNOWN';
   defconDisplay.className = 'defcon-display defcon-' + level;
 
+  // DEFCON screen tint
+  const tint = document.getElementById('defconTint');
+  if (tint) tint.className = 'defcon-tint tint-' + level;
+
   // Perimeter
   const p = d.perimeter || {};
   document.getElementById('dClients').textContent = p.total_clients ?? '--';
@@ -1148,6 +1272,9 @@ function renderDefenseStatus(d) {
     pwnaEl.className = 'defense-stat-value';
     pwnaEl.style.color = 'var(--fg-dim)';
   }
+
+  // Update radar blips from RF data
+  updateRadarFromDefense(rf);
 
   // Mining Fleet
   const m = d.miner_fleet || {};
@@ -1562,12 +1689,14 @@ function startPolling() {
   catchUpActivity().then(() => {
     actInterval = setInterval(pollActivity, 2000);
   });
+  initRadar();
 }
 
 function stopPolling() {
   clearInterval(dashInterval);
   clearInterval(defenseInterval);
   clearInterval(actInterval);
+  stopRadar();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -1609,10 +1738,226 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
+// ── WarGames Radar Sweep ──────────────────────
+let radarAngle = 0;
+let radarBlips = [];
+let radarAnimId = null;
+let radarActive = false;
+const _radarSeeds = [];
+let _lastDeauthTotal = 0;
+
+function initRadar() {
+  radarActive = true;
+  renderRadarFrame();
+}
+
+function stopRadar() {
+  radarActive = false;
+  if (radarAnimId) { cancelAnimationFrame(radarAnimId); radarAnimId = null; }
+}
+
+function renderRadarFrame() {
+  if (!radarActive) return;
+  const canvas = document.getElementById('radarCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const cw = canvas.width, ch = canvas.height;
+  const cx = cw / 2, cy = ch / 2;
+  const r = Math.min(cx, cy) - 10;
+
+  ctx.clearRect(0, 0, cw, ch);
+
+  // Dark background circle
+  ctx.fillStyle = '#010a01';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Grid rings
+  ctx.strokeStyle = 'rgba(0, 255, 65, 0.12)';
+  ctx.lineWidth = 0.8;
+  for (let i = 1; i <= 3; i++) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * i / 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Crosshairs
+  ctx.beginPath();
+  ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
+  ctx.stroke();
+
+  // Sweep trail — fading wedge behind the sweep line
+  const trailLen = Math.PI / 3;
+  const steps = 24;
+  for (let i = 0; i < steps; i++) {
+    const t = i / steps;
+    const alpha = 0.20 * (1 - t) * (1 - t);
+    ctx.fillStyle = `rgba(0, 255, 65, ${alpha})`;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    const a1 = radarAngle - trailLen * (i / steps);
+    const a2 = radarAngle - trailLen * ((i + 1) / steps);
+    ctx.arc(cx, cy, r, a2, a1);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Sweep line
+  ctx.strokeStyle = 'rgba(0, 255, 65, 0.9)';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#00ff41';
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(radarAngle) * r, cy + Math.sin(radarAngle) * r);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Blips — fade over 6 seconds
+  const now = Date.now();
+  radarBlips = radarBlips.filter(b => now - b.born < 6000);
+  for (const b of radarBlips) {
+    const age = (now - b.born) / 6000;
+    const alpha = Math.max(0, 1 - age * age);
+    const bx = cx + b.x * r;
+    const by = cy + b.y * r;
+    const color = b.type === 'deauth' ? `rgba(255, 136, 0, ${alpha})`
+                : b.type === 'rogue'  ? `rgba(255, 51, 51, ${alpha})`
+                : `rgba(0, 255, 65, ${alpha})`;
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(bx, by, b.type === 'rogue' ? 5 : 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // Outer ring
+  ctx.strokeStyle = 'rgba(0, 255, 65, 0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Cardinal labels
+  ctx.fillStyle = 'rgba(0, 255, 65, 0.3)';
+  ctx.font = '11px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('N', cx, cy - r + 14);
+  ctx.fillText('S', cx, cy + r - 6);
+  ctx.textAlign = 'left';
+  ctx.fillText('E', cx + r - 16, cy + 4);
+  ctx.textAlign = 'right';
+  ctx.fillText('W', cx - r + 16, cy + 4);
+  ctx.textAlign = 'left';
+
+  // Advance sweep (~3 rpm)
+  radarAngle += 0.025;
+  if (radarAngle > Math.PI * 2) radarAngle -= Math.PI * 2;
+
+  radarAnimId = requestAnimationFrame(renderRadarFrame);
+}
+
+function updateRadarFromDefense(rfData) {
+  if (!rfData || !rfData.available) return;
+  const apCount = rfData.known_rf_aps || 0;
+  const deauthTotal = rfData.deauth_events_total || 0;
+  const now = Date.now();
+
+  // Generate persistent seed positions for each known AP
+  while (_radarSeeds.length < apCount) {
+    _radarSeeds.push({
+      angle: Math.random() * Math.PI * 2,
+      dist: 0.25 + Math.random() * 0.6
+    });
+  }
+
+  // Refresh AP blips every 4 seconds (appear as sweep passes)
+  if (!updateRadarFromDefense._t || now - updateRadarFromDefense._t > 4000) {
+    updateRadarFromDefense._t = now;
+    const count = Math.min(apCount, _radarSeeds.length);
+    for (let i = 0; i < count; i++) {
+      const s = _radarSeeds[i];
+      radarBlips.push({
+        x: Math.cos(s.angle) * s.dist,
+        y: Math.sin(s.angle) * s.dist,
+        born: now + Math.random() * 800,
+        type: 'ap'
+      });
+    }
+  }
+
+  // Deauth event blips — flash when count increases
+  if (deauthTotal > _lastDeauthTotal && _lastDeauthTotal > 0) {
+    const diff = Math.min(deauthTotal - _lastDeauthTotal, 5);
+    for (let i = 0; i < diff; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = 0.3 + Math.random() * 0.5;
+      radarBlips.push({
+        x: Math.cos(a) * d, y: Math.sin(a) * d,
+        born: now, type: 'deauth'
+      });
+    }
+  }
+  _lastDeauthTotal = deauthTotal;
+}
+
+// ── WarGames Boot Sequence ────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function bootSequence() {
+  const overlay = document.getElementById('bootOverlay');
+  const textEl = document.getElementById('bootText');
+  if (!overlay || !textEl) return;
+
+  const lines = [
+    '  WOPR DEFENSE NETWORK',
+    '  LOGON: BLACKBOARD // MISSION CONTROL',
+    '',
+    '  IDENTIFICATION NOT REQUIRED',
+    '',
+    '  LOADING DEFENSE GRID .........',
+    '  PERIMETER MONITOR ............ OK',
+    '  RF SUBSYSTEM ................. OK',
+    '  MINING FLEET ................. OK',
+    '  AGENT NETWORK ................ OK',
+    '',
+    '  GREETINGS, PROFESSOR FALKEN.',
+    '',
+    '  > SYSTEM READY_'
+  ];
+
+  for (const line of lines) {
+    if (line === '') {
+      textEl.textContent += '\n';
+      await sleep(150);
+      continue;
+    }
+    for (const ch of line) {
+      textEl.textContent += ch;
+      playTick();
+      await sleep(20 + Math.random() * 15);
+    }
+    textEl.textContent += '\n';
+    await sleep(100);
+  }
+
+  await sleep(600);
+  overlay.classList.add('fade-out');
+  await sleep(1000);
+  overlay.remove();
+}
+
 // ── Boot ───────────────────────────────────────
 initResize();
 initScrollTracking();
-startPolling();
+bootSequence().then(() => {
+  startPolling();
+  initRadar();
+});
 </script>
 </body>
 </html>
