@@ -303,6 +303,36 @@
     }
     .defense-nominal { color: var(--fg-dim); font-size: 12px; padding: 4px 8px; display: block; }
 
+    /* RF Monitor: 3-column grid for expanded stats */
+    .rf-grid { grid-template-columns: 1fr 1fr 1fr; }
+
+    /* Scan indicator — WarGames-style rotating sweep */
+    .rf-scan-indicator {
+      display: inline-block;
+      font-size: 10px;
+      letter-spacing: 1px;
+      margin-left: 6px;
+      color: var(--fg-dim);
+    }
+    .rf-scan-indicator.scanning {
+      color: var(--fg-bright);
+      animation: rf-blink 0.5s steps(1) infinite;
+    }
+    @keyframes rf-blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Pwnagotchi alert — red pulse when detected */
+    .pwnagotchi-alert {
+      color: var(--critical) !important;
+      animation: pwna-pulse 1s ease-in-out infinite;
+    }
+    @keyframes pwna-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
     .threat-list { padding: 0 8px 4px; max-height: 120px; overflow-y: auto; }
     .threat-item {
       font-size: 12px;
@@ -566,8 +596,8 @@
           </div>
 
           <div class="defense-section">
-            <div class="defense-section-header">RF MONITOR</div>
-            <div class="defense-grid">
+            <div class="defense-section-header">RF MONITOR <span id="rfScanIndicator" class="rf-scan-indicator"></span></div>
+            <div class="defense-grid rf-grid">
               <div class="defense-stat">
                 <span class="defense-stat-label">STATUS</span>
                 <span class="defense-stat-value" id="rfStatus">OFFLINE</span>
@@ -581,8 +611,16 @@
                 <span class="defense-stat-value" id="rfAPs">--</span>
               </div>
               <div class="defense-stat">
-                <span class="defense-stat-label">DEAUTH EVENTS</span>
+                <span class="defense-stat-label">DEAUTH</span>
                 <span class="defense-stat-value" id="rfDeauth">--</span>
+              </div>
+              <div class="defense-stat">
+                <span class="defense-stat-label">PROBE DEVICES</span>
+                <span class="defense-stat-value" id="rfProbes">--</span>
+              </div>
+              <div class="defense-stat">
+                <span class="defense-stat-label">PWNAGOTCHI</span>
+                <span class="defense-stat-value" id="rfPwnagotchi">CLEAR</span>
               </div>
             </div>
           </div>
@@ -1066,9 +1104,50 @@ function renderDefenseStatus(d) {
   const rfEl = document.getElementById('rfStatus');
   rfEl.textContent = rfAvail ? 'ACTIVE' : 'OFFLINE';
   rfEl.style.color = rfAvail ? 'var(--fg)' : 'var(--fg-dim)';
-  document.getElementById('rfMode').textContent = rf.mode || '--';
+
+  // Mode display with scan indicator animation
+  const mode = rf.mode || '--';
+  const modeEl = document.getElementById('rfMode');
+  const scanInd = document.getElementById('rfScanIndicator');
+  modeEl.textContent = mode;
+  if (mode === 'scanap') {
+    modeEl.style.color = 'var(--medium)';
+    scanInd.textContent = '[SCANNING APs]';
+    scanInd.className = 'rf-scan-indicator scanning';
+  } else if (mode === 'sniffprobe') {
+    modeEl.style.color = 'var(--medium)';
+    scanInd.textContent = '[PROBE SWEEP]';
+    scanInd.className = 'rf-scan-indicator scanning';
+  } else if (mode === 'sniffpwnagotchi') {
+    modeEl.style.color = 'var(--high)';
+    scanInd.textContent = '[PWNA HUNT]';
+    scanInd.className = 'rf-scan-indicator scanning';
+  } else if (mode === 'sniffdeauth') {
+    modeEl.style.color = 'var(--fg-bright)';
+    scanInd.textContent = '';
+    scanInd.className = 'rf-scan-indicator';
+  } else {
+    scanInd.textContent = '';
+    scanInd.className = 'rf-scan-indicator';
+  }
+
   document.getElementById('rfAPs').textContent = rf.known_rf_aps ?? '--';
   document.getElementById('rfDeauth').textContent = rf.deauth_events_total ?? '--';
+  document.getElementById('rfProbes').textContent = rf.probe_devices ?? '--';
+
+  // Pwnagotchi indicator
+  const pwnaEl = document.getElementById('rfPwnagotchi');
+  const pwnaCount = rf.pwnagotchi_detections || 0;
+  if (pwnaCount > 0) {
+    const names = (rf.pwnagotchi_names || []).join(', ') || '??';
+    pwnaEl.textContent = pwnaCount + ' DETECTED';
+    pwnaEl.className = 'defense-stat-value pwnagotchi-alert';
+    pwnaEl.title = names;
+  } else {
+    pwnaEl.textContent = 'CLEAR';
+    pwnaEl.className = 'defense-stat-value';
+    pwnaEl.style.color = 'var(--fg-dim)';
+  }
 
   // Mining Fleet
   const m = d.miner_fleet || {};

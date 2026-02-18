@@ -211,6 +211,10 @@ MARAUDER_DEVICE = os.environ.get("WOPR_MARAUDER_DEVICE", "/dev/ttyACM0")
 MARAUDER_BAUD = int(os.environ.get("WOPR_MARAUDER_BAUD", "115200"))
 MARAUDER_SCAN_INTERVAL = int(os.environ.get("WOPR_MARAUDER_SCAN_INTERVAL", "300"))  # AP scan every 5 min
 MARAUDER_SCAN_DWELL = int(os.environ.get("WOPR_MARAUDER_SCAN_DWELL", "15"))  # seconds to dwell on scanap
+MARAUDER_PROBE_INTERVAL = int(os.environ.get("WOPR_MARAUDER_PROBE_INTERVAL", "600"))  # probe scan every 10 min
+MARAUDER_PROBE_DWELL = int(os.environ.get("WOPR_MARAUDER_PROBE_DWELL", "30"))  # seconds to dwell on sniffprobe
+MARAUDER_PWNAGOTCHI_INTERVAL = int(os.environ.get("WOPR_MARAUDER_PWNA_INTERVAL", "900"))  # pwnagotchi scan every 15 min
+MARAUDER_PWNAGOTCHI_DWELL = int(os.environ.get("WOPR_MARAUDER_PWNA_DWELL", "20"))  # seconds to dwell on sniffpwnagotchi
 MARAUDER_DEAUTH_BURST_THRESHOLD = int(os.environ.get("WOPR_MARAUDER_DEAUTH_BURST", "5"))  # frames in window
 MARAUDER_DEAUTH_BURST_WINDOW = int(os.environ.get("WOPR_MARAUDER_DEAUTH_WINDOW", "30"))  # seconds
 

@@ -3,11 +3,17 @@ W.O.P.R. Network Defense Sentry — ESP32 Marauder RF Monitor
 Serial interface to ESP32 Marauder via Flipper Zero USB-UART Bridge.
 
 Provides RF-layer awareness: rogue AP detection, deauth attack monitoring,
-and probe request capture. Complements UniFi controller-level monitoring
-with over-the-air signal intelligence.
+probe request intelligence, and Pwnagotchi/war-driver detection.
+Complements UniFi controller-level monitoring with over-the-air SIGINT.
 
 Prerequisite: Flipper Zero in USB-UART Bridge mode (GPIO > USB-UART Bridge,
 115200 baud, pins 13/14) with ESP32 Marauder GPIO board attached.
+
+Mode cycling (4-phase):
+  1. sniffdeauth  — primary passive monitoring (~80% of time)
+  2. scanap       — AP discovery + rogue detection (every 5 min, 15s dwell)
+  3. sniffprobe   — probe request intelligence (every 10 min, 30s dwell)
+  4. sniffpwnagotchi — war-driver detection (every 15 min, 20s dwell)
 """
 
 import logging
@@ -20,31 +26,44 @@ from collections import defaultdict, deque
 from config import (
     MARAUDER_DEVICE, MARAUDER_BAUD,
     MARAUDER_SCAN_INTERVAL, MARAUDER_SCAN_DWELL,
+    MARAUDER_PROBE_INTERVAL, MARAUDER_PROBE_DWELL,
+    MARAUDER_PWNAGOTCHI_INTERVAL, MARAUDER_PWNAGOTCHI_DWELL,
     MARAUDER_DEAUTH_BURST_THRESHOLD, MARAUDER_DEAUTH_BURST_WINDOW,
 )
 
 logger = logging.getLogger(__name__)
 
-# Serial output parsers — matched to actual ESP32 Marauder output format
+# ── Serial Output Parsers ─────────────────────────────────
+# Matched to actual ESP32 Marauder output format (firmware v0.13+)
+
 # scanap: "-38 Ch: 9 BSSID: 9c:05:d6:37:44:a4 ESSID: SlipStream2.4"
 _RE_SCANAP = re.compile(
     r'(-?\d+)\s+Ch:\s*(\d+)\s+BSSID:\s*([0-9a-fA-F:]{17})\s+ESSID:\s*(.*)'
 )
 # sniffdeauth: "Deauth: AA:BB:CC:DD:EE:FF -> 11:22:33:44:55:66 Reason: N Type: N"
-# Also captures: "Type: Deauth Src: AA:BB:CC:DD:EE:FF Dst: 11:22:33:44:55:66"
 _RE_DEAUTH_V1 = re.compile(
     r'Deauth:\s*([0-9a-fA-F:]{17})\s*->\s*([0-9a-fA-F:]{17})'
 )
+# Alternate format: "Type: Deauth Src: AA:BB:CC:DD:EE:FF Dst: 11:22:33:44:55:66"
 _RE_DEAUTH_V2 = re.compile(
     r'Src:\s*([0-9a-fA-F:]{17})\s+Dst:\s*([0-9a-fA-F:]{17})'
 )
-# Bare MAC line during deauth sniff (actual deauth frame capture)
-_RE_DEAUTH_MAC = re.compile(
-    r'^([0-9a-fA-F:]{17})$'
+# sniffprobe: RSSI + BSSID + ESSID (same format as scanap but from probe frames)
+# Also: "Src: AA:BB:CC:DD:EE:FF SSID: NetworkName" or RSSI-prefixed
+_RE_PROBE_V1 = re.compile(
+    r'(-?\d+)\s+Ch:\s*(\d+)\s+BSSID:\s*([0-9a-fA-F:]{17})\s+ESSID:\s*(.*)'
 )
-_RE_PROBE = re.compile(
+_RE_PROBE_V2 = re.compile(
     r'Src:\s*([0-9a-fA-F:]{17}).*?(?:SSID|ESSID):\s*(.*)'
 )
+# sniffpwnagotchi: "Pwnagotchi: <name> (AA:BB:CC:DD:EE:FF) RSSI: -NN"
+# Also: name + MAC in various formats
+_RE_PWNAGOTCHI = re.compile(
+    r'([Pp]wnagotchi|[Pp]wnd?).*?([0-9a-fA-F:]{17})'
+)
+# Fallback: any line with "pwnagotchi" in it (case-insensitive)
+_RE_PWNAGOTCHI_NAME = re.compile(r'name[:\s]*["\']?(\S+)', re.IGNORECASE)
+
 # Status lines to ignore (not data)
 _IGNORE_PREFIXES = (
     "Starting", "Stopping", "ESP32 Marauder", "By:", "---", "> ",
@@ -55,9 +74,8 @@ _IGNORE_PREFIXES = (
 class MarauderMonitor:
     """ESP32 Marauder serial interface via Flipper Zero USB-UART bridge.
 
-    Manages serial connection lifecycle, background reading, mode cycling
-    between passive sniffdeauth and periodic scanap sweeps, and cross-
-    referencing AP scans against UniFi managed infrastructure.
+    4-phase mode cycling for comprehensive RF-layer defense:
+      sniffdeauth (primary) → scanap → sniffprobe → sniffpwnagotchi → repeat
     """
 
     def __init__(self, blackboard, voice):
@@ -65,8 +83,14 @@ class MarauderMonitor:
         self.voice = voice
         self._device_path = MARAUDER_DEVICE
         self._baud = MARAUDER_BAUD
+
+        # Timing config
         self._scan_interval = MARAUDER_SCAN_INTERVAL
         self._scan_dwell = MARAUDER_SCAN_DWELL
+        self._probe_interval = MARAUDER_PROBE_INTERVAL
+        self._probe_dwell = MARAUDER_PROBE_DWELL
+        self._pwnagotchi_interval = MARAUDER_PWNAGOTCHI_INTERVAL
+        self._pwnagotchi_dwell = MARAUDER_PWNAGOTCHI_DWELL
         self._burst_threshold = MARAUDER_DEAUTH_BURST_THRESHOLD
         self._burst_window = MARAUDER_DEAUTH_BURST_WINDOW
 
@@ -82,7 +106,7 @@ class MarauderMonitor:
         self._connect_attempted = False
 
         # AP scan data
-        self._known_rf_aps = {}  # bssid -> {ssid, channel, rssi, enc, first_seen, last_seen, count}
+        self._known_rf_aps = {}  # bssid -> {ssid, channel, rssi, first_seen, last_seen, count}
         self._ap_scan_buffer = []
         self._last_scan_time = 0
 
@@ -91,11 +115,22 @@ class MarauderMonitor:
         self._deauth_rate = defaultdict(list)  # src_mac -> [timestamps]
         self._deauth_total = 0
 
-        # Probe tracking
-        self._probe_devices = set()  # unique source MACs seen probing
+        # Probe request tracking
+        self._probe_devices = {}  # src_mac -> {ssids: set, first_seen, last_seen, count}
+        self._probe_buffer = []   # current sweep results
+        self._last_probe_time = 0
+        self._probe_total = 0
 
-        logger.info(f"MarauderMonitor initialized (device={self._device_path}, "
-                    f"scan_interval={self._scan_interval}s, dwell={self._scan_dwell}s)")
+        # Pwnagotchi tracking
+        self._pwnagotchi_detections = {}  # mac -> {name, rssi, first_seen, last_seen, count}
+        self._pwnagotchi_buffer = []
+        self._last_pwnagotchi_time = 0
+
+        logger.info(
+            f"MarauderMonitor initialized (device={self._device_path}, "
+            f"ap_scan={self._scan_interval}s/{self._scan_dwell}s, "
+            f"probe={self._probe_interval}s/{self._probe_dwell}s, "
+            f"pwnagotchi={self._pwnagotchi_interval}s/{self._pwnagotchi_dwell}s)")
 
     # ── Serial Connection ──────────────────────────────────
 
@@ -109,21 +144,15 @@ class MarauderMonitor:
             # Configure termios for 115200 8N1 raw mode
             attrs = termios.tcgetattr(self._fd)
 
-            # Input flags: no parity, no strip, no flow control
-            attrs[0] = 0  # iflag
-            # Output flags: raw
-            attrs[1] = 0  # oflag
-            # Control flags: 8N1, enable receiver, local mode
-            attrs[2] = (termios.CS8 | termios.CREAD | termios.CLOCAL)
-            # Local flags: raw (no echo, no canonical, no signals)
-            attrs[3] = 0  # lflag
+            attrs[0] = 0  # iflag: no parity, no strip, no flow control
+            attrs[1] = 0  # oflag: raw
+            attrs[2] = (termios.CS8 | termios.CREAD | termios.CLOCAL)  # 8N1
+            attrs[3] = 0  # lflag: raw (no echo, no canonical, no signals)
 
-            # Baud rate
             baud_const = getattr(termios, f'B{self._baud}', termios.B115200)
             attrs[4] = baud_const  # ispeed
             attrs[5] = baud_const  # ospeed
 
-            # Control characters
             attrs[6][termios.VMIN] = 1   # read at least 1 byte
             attrs[6][termios.VTIME] = 1  # 100ms timeout
 
@@ -230,6 +259,8 @@ class MarauderMonitor:
                         self._parse_deauth_line(line)
                     elif mode == 'sniffprobe':
                         self._parse_probe_line(line)
+                    elif mode == 'sniffpwnagotchi':
+                        self._parse_pwnagotchi_line(line)
 
             except OSError as e:
                 if self._running:
@@ -292,12 +323,93 @@ class MarauderMonitor:
         self._deauth_total += 1
 
     def _parse_probe_line(self, line):
-        """Parse sniffprobe output: source MAC, probed SSID."""
-        m = _RE_PROBE.search(line)
-        if not m:
+        """Parse sniffprobe output: source MAC + probed SSID.
+
+        Tracks per-device probe history to detect reconnaissance patterns.
+        """
+        src = None
+        ssid = None
+
+        # Try RSSI-prefixed format (same as scanap but from probe frames)
+        m = _RE_PROBE_V1.search(line)
+        if m:
+            src = m.group(3).lower()
+            ssid = m.group(4).strip()
+        else:
+            # Try Src: MAC SSID: name format
+            m = _RE_PROBE_V2.search(line)
+            if m:
+                src = m.group(1).lower()
+                ssid = m.group(2).strip()
+
+        if not src:
             return
-        src = m.group(1).lower()
-        self._probe_devices.add(src)
+
+        now = time.time()
+        self._probe_total += 1
+
+        # Build per-device probe history
+        if src not in self._probe_devices:
+            self._probe_devices[src] = {
+                "ssids": set(),
+                "first_seen": now,
+                "last_seen": now,
+                "count": 0,
+            }
+
+        device = self._probe_devices[src]
+        device["last_seen"] = now
+        device["count"] += 1
+        if ssid:
+            device["ssids"].add(ssid)
+
+        # Buffer for current sweep
+        self._probe_buffer.append({"src": src, "ssid": ssid, "time": now})
+
+    def _parse_pwnagotchi_line(self, line):
+        """Parse sniffpwnagotchi output: detect Pwnagotchi beacon frames.
+
+        Pwnagotchis broadcast custom beacon frames with identifiable patterns.
+        Detection = someone nearby is actively hunting WPA handshakes.
+        """
+        mac = None
+        name = "unknown"
+
+        m = _RE_PWNAGOTCHI.search(line)
+        if m:
+            mac = m.group(2).lower()
+            # Try to extract name
+            nm = _RE_PWNAGOTCHI_NAME.search(line)
+            if nm:
+                name = nm.group(1).strip('"\'')
+        elif "pwnagotchi" in line.lower() or "pwnd" in line.lower():
+            # Fallback: any line mentioning pwnagotchi during sniffpwnagotchi mode
+            # Try to find a MAC anywhere in the line
+            mac_match = re.search(r'([0-9a-fA-F:]{17})', line)
+            if mac_match:
+                mac = mac_match.group(1).lower()
+            nm = _RE_PWNAGOTCHI_NAME.search(line)
+            if nm:
+                name = nm.group(1).strip('"\'')
+
+        if not mac:
+            return
+
+        now = time.time()
+        self._pwnagotchi_buffer.append({"mac": mac, "name": name, "time": now})
+
+        # Track persistent detections
+        if mac in self._pwnagotchi_detections:
+            existing = self._pwnagotchi_detections[mac]
+            existing["last_seen"] = now
+            existing["count"] += 1
+        else:
+            self._pwnagotchi_detections[mac] = {
+                "name": name,
+                "first_seen": now,
+                "last_seen": now,
+                "count": 1,
+            }
 
     # ── Mode Switching ─────────────────────────────────────
 
@@ -322,15 +434,15 @@ class MarauderMonitor:
     # ── Poll Interface (called from defense loop) ──────────
 
     def poll(self, poll_count, managed_aps, known_ssids):
-        """Run periodic checks. Returns list of anomaly dicts.
+        """Run periodic checks with 4-phase mode cycling.
 
-        Args:
-            poll_count: defense loop cycle number
-            managed_aps: set of BSSID MACs managed by UniFi
-            known_ssids: list of legitimate SSIDs
+        Phase rotation (all times from last scan of each type):
+          1. sniffdeauth  — primary (always returns to this)
+          2. scanap       — every SCAN_INTERVAL (5 min), SCAN_DWELL (15s)
+          3. sniffprobe   — every PROBE_INTERVAL (10 min), PROBE_DWELL (30s)
+          4. sniffpwnagotchi — every PWNAGOTCHI_INTERVAL (15 min), PWNAGOTCHI_DWELL (20s)
 
-        Returns:
-            List of anomaly dicts with 'type', 'source'='marauder', etc.
+        Returns list of anomaly dicts with 'type', 'source'='marauder'.
         """
         # Connect on first call
         if not self._connect_attempted:
@@ -350,26 +462,34 @@ class MarauderMonitor:
         anomalies = []
         now = time.time()
 
-        # 1. Process deauth events → detect bursts
+        # 1. Process deauth events → detect bursts (always, regardless of mode)
         anomalies.extend(self._process_deauth_events())
 
-        # 2. Periodic AP scan
+        # 2. Phase cycling — only run one scan type per poll to minimize time off deauth
         if (now - self._last_scan_time) >= self._scan_interval:
             self._last_scan_time = now
             anomalies.extend(self._run_ap_scan(managed_aps, known_ssids))
 
+        elif (now - self._last_probe_time) >= self._probe_interval:
+            self._last_probe_time = now
+            anomalies.extend(self._run_probe_scan(known_ssids))
+
+        elif (now - self._last_pwnagotchi_time) >= self._pwnagotchi_interval:
+            self._last_pwnagotchi_time = now
+            anomalies.extend(self._run_pwnagotchi_scan())
+
         return anomalies
+
+    # ── Phase 2: AP Scan ──────────────────────────────────
 
     def _run_ap_scan(self, managed_aps, known_ssids):
         """Switch to scanap, dwell, cross-reference, switch back."""
         anomalies = []
 
         try:
-            # Switch to AP scan mode
             self._switch_mode("scanap")
             time.sleep(self._scan_dwell)
 
-            # Read results from buffer
             scanned = list(self._ap_scan_buffer)
             new_count = 0
 
@@ -386,20 +506,18 @@ class MarauderMonitor:
                         "ssid": ssid,
                         "channel": ap.get("channel", 0),
                         "rssi": ap.get("rssi", 0),
-                        "enc": ap.get("enc", "?"),
                     })
 
-                # Track new APs
                 info = self._known_rf_aps.get(bssid, {})
                 if info.get("count", 0) <= 1:
                     new_count += 1
 
-            # Post scan summary to activity log
             rogue_count = len(anomalies)
             try:
                 self.blackboard.post_activity(
-                    f"[RF] AP scan complete: {len(scanned)} observed, "
-                    f"{new_count} new, {rogue_count} rogue",
+                    f"[RF] AP scan: {len(scanned)} observed, "
+                    f"{new_count} new, {rogue_count} rogue, "
+                    f"{len(self._known_rf_aps)} total tracked",
                     entry_type="OK" if rogue_count == 0 else "WARN"
                 )
             except Exception:
@@ -412,10 +530,168 @@ class MarauderMonitor:
             logger.error(f"Marauder AP scan error: {e}")
 
         finally:
-            # Switch back to deauth monitoring
             self._switch_mode("sniffdeauth")
 
         return anomalies
+
+    # ── Phase 3: Probe Request Scan ───────────────────────
+
+    def _run_probe_scan(self, known_ssids):
+        """Switch to sniffprobe, dwell, analyze probe patterns, switch back.
+
+        Intelligence gathered:
+        - Devices probing for known SSIDs (pre-attack recon)
+        - Devices with unusual probe counts (scanning/enumeration)
+        - Per-device SSID history for fingerprinting
+        """
+        anomalies = []
+
+        try:
+            self._probe_buffer.clear()
+            self._switch_mode("sniffprobe")
+            time.sleep(self._probe_dwell)
+
+            sweep = list(self._probe_buffer)
+            unique_devices = set()
+            suspicious_probes = []
+
+            for probe in sweep:
+                src = probe["src"]
+                ssid = probe["ssid"]
+                unique_devices.add(src)
+
+                # Suspicious: unknown device probing for our network SSIDs
+                if ssid and ssid in known_ssids:
+                    suspicious_probes.append(probe)
+
+            # Generate anomalies for suspicious probing
+            # Group by source MAC to avoid flooding
+            suspicious_by_src = defaultdict(list)
+            for p in suspicious_probes:
+                suspicious_by_src[p["src"]].append(p["ssid"])
+
+            for src, ssids in suspicious_by_src.items():
+                anomalies.append({
+                    "type": "suspicious_probe",
+                    "source": "marauder",
+                    "mac": src,
+                    "probed_ssids": list(set(ssids)),
+                    "count": len(ssids),
+                })
+
+            # Post activity summary
+            try:
+                suspicious_count = len(suspicious_by_src)
+                self.blackboard.post_activity(
+                    f"[RF] Probe scan: {len(sweep)} requests from "
+                    f"{len(unique_devices)} devices, "
+                    f"{suspicious_count} probing known SSIDs, "
+                    f"{len(self._probe_devices)} total devices tracked",
+                    entry_type="OK" if suspicious_count == 0 else "WARN"
+                )
+            except Exception:
+                pass
+
+            logger.info(
+                f"[RF] Probe scan: {len(sweep)} requests, "
+                f"{len(unique_devices)} devices, "
+                f"{len(suspicious_by_src)} suspicious, "
+                f"{len(self._probe_devices)} total tracked")
+
+        except Exception as e:
+            logger.error(f"Marauder probe scan error: {e}")
+
+        finally:
+            self._switch_mode("sniffdeauth")
+
+        return anomalies
+
+    # ── Phase 4: Pwnagotchi Detection ─────────────────────
+
+    def _run_pwnagotchi_scan(self):
+        """Switch to sniffpwnagotchi, dwell, detect war-drivers, switch back.
+
+        Pwnagotchis broadcast identifiable beacon frames with custom
+        vendor-specific information elements. Detection = someone nearby
+        is actively capturing WPA handshakes with an AI-assisted tool.
+
+        This is a CRITICAL alert — immediate DEFCON escalation.
+        """
+        anomalies = []
+
+        try:
+            self._pwnagotchi_buffer.clear()
+            self._switch_mode("sniffpwnagotchi")
+            time.sleep(self._pwnagotchi_dwell)
+
+            detections = list(self._pwnagotchi_buffer)
+
+            if detections:
+                # Deduplicate by MAC for this sweep
+                seen_macs = {}
+                for d in detections:
+                    mac = d["mac"]
+                    if mac not in seen_macs:
+                        seen_macs[mac] = d
+
+                for mac, det in seen_macs.items():
+                    info = self._pwnagotchi_detections.get(mac, {})
+                    anomalies.append({
+                        "type": "pwnagotchi_detected",
+                        "source": "marauder",
+                        "mac": mac,
+                        "name": det.get("name", info.get("name", "unknown")),
+                        "sightings": info.get("count", 1),
+                    })
+
+                # Voice alert for pwnagotchi detection
+                if self.voice:
+                    try:
+                        names = ", ".join(d.get("name", "unknown") for d in seen_macs.values())
+                        self.voice.speak(
+                            f"Warning. Pwnagotchi detected in perimeter. "
+                            f"Device {'names' if len(seen_macs) > 1 else 'name'}: {names}. "
+                            f"Someone is hunting W.P.A. handshakes."
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    pwna_desc = ", ".join(
+                        f"{d.get('name', '?')} ({m})" for m, d in seen_macs.items())
+                    self.blackboard.post_activity(
+                        f"[RF] PWNAGOTCHI DETECTED: {len(seen_macs)} war-driver(s) "
+                        f"in range — {pwna_desc}",
+                        entry_type="CRITICAL"
+                    )
+                except Exception:
+                    pass
+
+                pwna_log = ", ".join(
+                    f"{d.get('name', '?')} ({m})" for m, d in seen_macs.items())
+                logger.warning(
+                    f"[RF] PWNAGOTCHI DETECTED: {len(seen_macs)} device(s) — {pwna_log}")
+            else:
+                try:
+                    self.blackboard.post_activity(
+                        f"[RF] Pwnagotchi sweep: clear — "
+                        f"no war-drivers detected",
+                        entry_type="OK"
+                    )
+                except Exception:
+                    pass
+
+                logger.info("[RF] Pwnagotchi sweep: clear")
+
+        except Exception as e:
+            logger.error(f"Marauder pwnagotchi scan error: {e}")
+
+        finally:
+            self._switch_mode("sniffdeauth")
+
+        return anomalies
+
+    # ── Deauth Burst Detection ────────────────────────────
 
     def _process_deauth_events(self):
         """Check deauth rate tracker for burst attacks."""
@@ -426,7 +702,6 @@ class MarauderMonitor:
 
         expired_srcs = []
         for src, timestamps in self._deauth_rate.items():
-            # Prune old timestamps
             recent = [t for t in timestamps if (now - t) <= window]
             self._deauth_rate[src] = recent
 
@@ -434,9 +709,7 @@ class MarauderMonitor:
                 expired_srcs.append(src)
                 continue
 
-            # Check burst threshold
             if len(recent) >= threshold:
-                # Find the most common target
                 targets = defaultdict(int)
                 for ts, s, d in self._deauth_events:
                     if s == src and (now - ts) <= window:
@@ -450,13 +723,11 @@ class MarauderMonitor:
                     "dst": top_target,
                     "count": len(recent),
                     "window": window,
-                    "mac": src,  # for posture tracking
+                    "mac": src,
                 })
 
-                # Clear this source after reporting (prevent re-trigger until new burst)
                 self._deauth_rate[src] = []
 
-        # Clean up empty entries
         for src in expired_srcs:
             del self._deauth_rate[src]
 
@@ -472,7 +743,14 @@ class MarauderMonitor:
             "known_rf_aps": len(self._known_rf_aps),
             "deauth_events_total": self._deauth_total,
             "probe_devices": len(self._probe_devices),
-            "last_scan": self._last_scan_time,
+            "probe_requests_total": self._probe_total,
+            "pwnagotchi_detections": len(self._pwnagotchi_detections),
+            "pwnagotchi_names": [
+                d.get("name", "?") for d in self._pwnagotchi_detections.values()
+            ],
+            "last_ap_scan": self._last_scan_time,
+            "last_probe_scan": self._last_probe_time,
+            "last_pwnagotchi_scan": self._last_pwnagotchi_time,
         }
 
     def stop(self):

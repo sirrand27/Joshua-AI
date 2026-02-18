@@ -479,6 +479,8 @@ class ThreatClassifier:
         # ESP32 Marauder RF monitor types
         "deauth_attack": SEVERITY_CRITICAL,
         "unknown_ap": SEVERITY_INFO,
+        "suspicious_probe": SEVERITY_MEDIUM,
+        "pwnagotchi_detected": SEVERITY_CRITICAL,
     }
 
     @classmethod
@@ -557,6 +559,16 @@ class ThreatClassifier:
         elif atype == "unknown_ap":
             return (f"Unknown AP via RF scan: {anomaly.get('ssid', 'hidden')} "
                     f"({anomaly.get('bssid', '??')}) Ch:{anomaly.get('channel', '?')}")
+
+        elif atype == "suspicious_probe":
+            ssids = anomaly.get("probed_ssids", [])
+            return (f"Suspicious probe requests from {anomaly.get('mac', '??')} — "
+                    f"probing {len(ssids)} known SSID(s): {', '.join(ssids[:3])}")
+
+        elif atype == "pwnagotchi_detected":
+            return (f"PWNAGOTCHI DETECTED: {anomaly.get('name', 'unknown')} "
+                    f"({anomaly.get('mac', '??')}) — war-driver in perimeter, "
+                    f"{anomaly.get('sightings', 1)} sighting(s)")
 
         return f"Anomaly detected: {json.dumps(anomaly)}"
 
