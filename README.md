@@ -17,9 +17,9 @@
 
 # W.O.P.R. — Network Defense Sentry
 
-**Autonomous network defense agent** powered by a local LLM via [Ollama](https://ollama.com). W.O.P.R. operates as a self-contained AI sentry on Kali Linux — monitoring the network perimeter via UniFi, detecting anomalies, classifying threats, and reporting to the Blackboard MCP coordination surface.
+**Autonomous network defense agent** powered by a fine-tuned local LLM via [Ollama](https://ollama.com). W.O.P.R. runs as a containerized 5-service stack on a **Jetson Orin Nano 8GB**, monitoring the network perimeter via UniFi, detecting anomalies, managing a BitAxe miner fleet, and coordinating with other agents through the Blackboard MCP surface.
 
-Part of the multi-agent OSINT framework alongside **JOSHUA** (Claude Code — senior analyst) and **TARS Dev** (Windows — development).
+Part of a multi-agent framework alongside **JOSHUA** (Claude Code — senior analyst, operator-facing) and **TARS Dev** (Windows — development, deployment).
 
 Aesthetic and callsign derived from the WOPR supercomputer in *WarGames* (1983).
 
@@ -30,323 +30,319 @@ Aesthetic and callsign derived from the WOPR supercomputer in *WarGames* (1983).
 | Agent | Identity | Role | Platform |
 |-------|----------|------|----------|
 | **JOSHUA** | Claude Code (Opus 4.6) | Interactive analyst, operator-facing | Kali Linux |
-| **W.O.P.R.** | Local Ollama sentry | Network defense, passive monitoring | Kali Linux |
-| **TARS Dev** | Windows AI agent | Development, coding, fine-tuning | Windows 11 |
+| **W.O.P.R.** | Local Ollama sentry (`joshua:cybersec`) | Network defense, miner fleet, passive monitoring | Jetson Orin Nano 8GB |
+| **TARS Dev** | Windows AI agent | Development, deployment, fine-tuning | Windows 11 |
+
+---
+
+## Current Deployment
+
+**Primary Host:** NVIDIA Jetson Orin Nano 8GB (`192.168.100.191`)
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| NVMe Boot | Samsung 990 PRO 1TB | 848GB free, root on `/dev/nvme0n1p1` |
+| Docker | CE 29.2.1 + Compose v5.0.2 | nvidia-container-toolkit 1.16.2 |
+| JetPack | 6.2.1 | aarch64, MAXN power mode, `jetson_clocks` |
+| Swap | 16GB on NVMe | `swappiness=60` |
+
+### Docker Compose Stack
+
+| Container | Port | Service | Health |
+|-----------|------|---------|--------|
+| `wopr-ollama` | 11434 | Ollama LLM server | `ollama list` check |
+| `wopr-blackboard` | 9700 | Blackboard MCP + Mission Control PWA | HTTP `/api/dashboard` |
+| `wopr-unifi-mcp` | 9600 | UniFi network MCP server | HTTP health endpoint |
+| `wopr-agent` | — | W.O.P.R. defense sentry loop | Log file freshness |
+| `wopr-voice` | 9876 | Piper TTS voice server | TCP socket check |
+
+All services use **bind-mounted volumes** for live code updates without container rebuilds.
 
 ---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    W.O.P.R. SENTRY LOOP                        │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │            UniFi Network Defense Loop (30s)               │  │
-│  │  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐   │  │
-│  │  │ UniFi MCP│→ │  Behavioral  │→ │ Threat Classifier│   │  │
-│  │  │  :9600   │  │  Baseline    │  │  + Auto-Response  │   │  │
-│  │  └──────────┘  └──────────────┘  └──────────────────┘   │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                                                                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐                │
-│  │Blackboard│  │  Voice   │  │   Learning   │                │
-│  │MCP :9700 │  │ F5-TTS   │  │  (training   │                │
-│  │(findings)│  │  :9876   │  │   examples)  │                │
-│  └──────────┘  └──────────┘  └──────────────┘                │
-└────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                    JETSON ORIN NANO 8GB                              │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │              W.O.P.R. DEFENSE SENTRY LOOP                     │  │
+│  │                                                               │  │
+│  │  ┌──────────┐  ┌──────────────┐  ┌────────────────────────┐  │  │
+│  │  │ UniFi MCP│→ │  Behavioral  │→ │ Threat Classification  │  │  │
+│  │  │  :9600   │  │  Baseline    │  │ + Auto-Response        │  │  │
+│  │  └──────────┘  └──────────────┘  └────────────────────────┘  │  │
+│  │                                                               │  │
+│  │  ┌──────────┐  ┌──────────────┐  ┌────────────────────────┐  │  │
+│  │  │  Miner   │  │  Device      │  │ Anomaly Deduplication  │  │  │
+│  │  │ Monitor  │  │  Knowledge   │  │ + Suppression Window   │  │  │
+│  │  │ (AxeOS)  │  │  Base        │  │                        │  │  │
+│  │  └──────────┘  └──────────────┘  └────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────────┐   │
+│  │Blackboard│  │Mission Control│  │  Ollama  │  │  Piper TTS   │   │
+│  │MCP :9700 │  │  PWA (v22)   │  │  :11434  │  │    :9876     │   │
+│  │(findings)│  │(teletype UI) │  │joshua:cs │  │ (voice alert)│   │
+│  └──────────┘  └──────────────┘  └──────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+         │                                     ▲
+         ▼                                     │
+   ┌──────────┐                          ┌──────────┐
+   │  JOSHUA  │  Blackboard MCP :9700    │ TARS Dev │
+   │  (Kali)  │◄────────────────────────►│(Windows) │
+   └──────────┘    Agent Coordination    └──────────┘
 ```
+
+---
 
 ## Features
 
-**Network Defense (Primary Mission)**
-- AI-augmented IDS via UniFi MCP (30-second polling)
-- Behavioral baseline learning (new devices, OUI tracking, population monitoring)
+### Network Defense (Primary Mission)
+- AI-augmented IDS via UniFi MCP (30-second polling cycle)
+- Behavioral baseline learning (device population, OUI tracking, network assignments)
 - Threat classification: CRITICAL / HIGH / MEDIUM / LOW / INFO
-- Auto-block on CRITICAL threats (rogue APs, etc.)
-- Voice alerts on HIGH+ severity events
-- All detections posted to Blackboard Live Activity
+- Auto-block on CRITICAL threats (rogue APs, unauthorized devices)
+- Anomaly deduplication with configurable suppression windows
+- Defense cycle status logged internally (no Live Activity clutter)
+- Hourly diagnostics posted only when subsystems are degraded
 
-**Blackboard Integration**
-- Posts anomaly findings with severity and evidence
+### Miner Fleet Monitoring
+- AxeOS BitAxe miner fleet management (HTTP API polling)
+- Real-time hashrate, temperature, and efficiency tracking
+- Temperature-based alerts (65C warning, 75C critical restart)
+- Pool failover detection and reporting
+- Share quality monitoring and anomaly detection
+- Fleet summary in W.O.P.R. status reports
+
+### Device Knowledge Base
+- Persistent SQLite device database with behavioral profiles
+- MAC address, OUI vendor, hostname, network assignment tracking
+- Trust scoring and historical anomaly correlation
+- Response action audit logging
+
+### Blackboard MCP Integration
+- Posts security findings with severity, evidence, and remediation
 - Reports perimeter status to Live Activity terminal
-- Sends heartbeat for Mission Control monitoring
-- Submits training examples for future fine-tuning
+- Agent-to-agent messaging (JOSHUA, TARS Dev, operator)
+- Training example submission for QLoRA fine-tuning
+- Heartbeat monitoring for Mission Control
 
-**Voice Integration**
-- Speaks threat alerts via F5-TTS Joshua voice clone (TCP :9876)
+### Mission Control PWA
+- Browser-based dashboard served at port 9700
+- Three-pane layout: Task Board, Agent Comms, Live Activity
+- WarGames-authentic teletype animation with tick sounds (Web Audio API)
+- Smart scroll follow-state (auto-follows typing, disengages on user scroll)
+- Incremental message rendering (no full DOM rebuild on poll)
+- Fast catch-up on page load (all history rendered instantly, only new lines animate)
+- DEFCON alert audio on CRITICAL events
+- Resizable panes with persistent layout (localStorage)
+- Service worker for offline capability
+
+### Voice Alerts
+- Piper TTS on Jetson (GPU-accelerated)
+- Speaks HIGH+ severity threat alerts
 - WarGames personality in voice output
-- Only speaks HIGH+ severity events
+
+### Learning System
+- Every defense cycle with anomalies generates structured training examples
+- Context, reasoning, action, observation, conclusion format
+- Batched and flushed to Blackboard for QLoRA fine-tuning pipeline
 
 ---
 
-## Prerequisites
-
-| Component | Version | Purpose |
-|-----------|---------|---------|
-| Python | 3.10+ | Agent runtime (stdlib only — no pip dependencies) |
-| [Ollama](https://ollama.com) | 0.16+ | Local LLM inference server |
-| Kali Linux | 2024.4+ | Host platform |
-| NVIDIA GPU | CUDA 12.x | GPU inference (optional — CPU fallback supported) |
-
-**MCP Services:**
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| Blackboard MCP | 9700 | Multi-agent coordination and findings |
-| UniFi MCP | 9600 | UniFi network monitoring and defense |
-| Court Records MCP | 9800 | Court/offender database searches (JOSHUA use) |
-| Flipper Zero MCP | 9900 | Hardware hacking integration (future) |
-| Joshua Voice Server | 9876 | F5-TTS voice synthesis |
-
----
-
-## Installation
-
-### Quick Setup
-
-```bash
-# 1. Clone the repo
-git clone <repo-url>
-cd Joshua-AI
-
-# 2. Install Ollama (if not already installed)
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 3. Pull the base model and create W.O.P.R. personality
-ollama pull dolphin-mistral:7b-v2.8
-ollama create joshua -f joshua.modelfile
-
-# 4. Run the automated setup
-bash setup.sh
-```
-
-### Manual Setup
-
-```bash
-# Create the Ollama model
-ollama create joshua -f joshua.modelfile
-
-# Install systemd service
-mkdir -p ~/.config/systemd/user/
-cp local-joshua.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-
-# Test
-python3 agent.py --status
-python3 agent.py --test
-```
-
----
-
-## Usage
-
-### CLI Modes
-
-```bash
-# Normal operation — defense sentry mode, monitors UniFi, posts to Blackboard
-python3 agent.py
-
-# Single inference test — sends one prompt to Ollama and prints response
-python3 agent.py --test
-
-# Status check — tests connectivity to all services
-python3 agent.py --status
-```
-
-### Launch All Services
-
-```bash
-# Start W.O.P.R. sentry + all MCP services + monitor
-bash launch-wopr.sh
-```
-
-### Systemd Service
-
-```bash
-# Enable and start
-systemctl --user enable local-joshua
-systemctl --user start local-joshua
-
-# View logs
-journalctl --user -u local-joshua -f
-
-# Restart
-systemctl --user restart local-joshua
-```
-
-### Status Check Output
+## Repository Structure
 
 ```
-=== W.O.P.R. Status ===
-Ollama: ONLINE (3 models, joshua:latest: YES)
-Blackboard: ONLINE (http://localhost:9700)
-Voice: ONLINE (localhost:9876)
-Court Records MCP: OFFLINE (http://localhost:9800)
-UniFi MCP: ONLINE (http://localhost:9600)
-Flipper Zero MCP: OFFLINE (http://localhost:9900)
+WOPR-AI/
+├── wopr/                        # W.O.P.R. Agent Modules
+│   ├── agent.py                 #   Defense sentry loop + inquiry system
+│   ├── config.py                #   Configuration (env var overrides)
+│   ├── unifi_defense.py         #   AI-augmented UniFi defense engine
+│   ├── device_db.py             #   Device knowledge base (SQLite)
+│   ├── miner_monitor.py         #   AxeOS BitAxe miner fleet monitor
+│   ├── blackboard.py            #   Blackboard MCP JSON-RPC client
+│   ├── blackboard_monitor.py    #   Message monitoring + auto-ACK
+│   ├── tools.py                 #   Tool registry + MCP service wrappers
+│   ├── voice.py                 #   TTS voice client
+│   ├── learning.py              #   Training example auto-generation
+│   ├── memory.py                #   Sliding window conversation memory
+│   ├── Dockerfile               #   Agent container image
+│   └── __init__.py
+│
+├── blackboard/                  # Blackboard MCP Server
+│   ├── server.py                #   FastMCP server (0.0.0.0:9700)
+│   ├── database.py              #   SQLite backing store
+│   ├── models.py                #   Data models
+│   ├── training.py              #   Training data export (JSONL)
+│   ├── Dockerfile               #   Server container image
+│   └── pwa/                     #   Mission Control Progressive Web App
+│       ├── index.html           #     Dashboard UI (v22)
+│       ├── sw.js                #     Service worker
+│       ├── manifest.json        #     PWA manifest
+│       ├── tick.wav             #     Teletype tick sample (30ms, 2.9KB)
+│       ├── defcon.wav           #     DEFCON alert sound
+│       ├── icon-192.png         #     App icon
+│       └── icon-512.png         #     App icon (large)
+│
+├── unifi-mcp/                   # UniFi Network MCP Server
+│   ├── server.py                #   MCP tool server (:9600)
+│   ├── unifi_client.py          #   UniFi controller API client
+│   ├── syslog_listener.py       #   UDP syslog receiver
+│   ├── models.py                #   Data models
+│   └── Dockerfile               #   Server container image
+│
+├── voice/                       # Voice Server
+│   ├── voice_server.py          #   Piper TTS server (:9876)
+│   └── Dockerfile               #   Voice container image
+│
+├── scripts/                     # Deployment
+│   ├── deploy.sh                #   Docker Compose deployment script
+│   └── jetson-first-boot.sh     #   Jetson Orin Nano first-boot setup
+│
+├── docker-compose.yml           # 5-service stack definition
+├── .env.example                 # Environment config template
+├── joshua.modelfile             # Ollama Modelfile (base personality)
+├── joshua_cybersec.modelfile    # Ollama Modelfile (fine-tuned cybersec)
+├── finetune_wopr.py             # QLoRA fine-tuning pipeline
+├── launch-wopr.sh               # Bare-metal launch script (non-Docker)
+├── local-joshua.service         # Systemd service unit (non-Docker)
+├── setup.sh                     # Quick setup script
+├── requirements.txt             # Python dependencies
+├── test_forensics.py            # Integration tests
+└── README.md
 ```
 
 ---
 
 ## Configuration
 
-All configuration is in `config.py` and can be overridden via environment variables:
+Environment variables are defined in `.env` (see `.env.example`):
+
+### Network Services
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JOSHUA_OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
-| `JOSHUA_MODEL` | `joshua:latest` | Ollama model name |
-| `BLACKBOARD_URL` | `http://localhost:9700` | Blackboard MCP endpoint |
-| `UNIFI_MCP_URL` | `http://localhost:9600` | UniFi MCP endpoint |
-| `JOSHUA_VOICE_HOST` | `localhost` | Voice server host |
-| `JOSHUA_VOICE_PORT` | `9876` | Voice server port |
-| `JOSHUA_VOICE_ENABLED` | `true` | Enable/disable voice output |
-| `JOSHUA_INFERENCE_DEVICE` | `cuda` | `cuda` or `cpu` |
-| `JOSHUA_POLL_INTERVAL` | `10` | Health check interval (seconds) |
-| `JOSHUA_LOG_FILE` | `/tmp/wopr.log` | Log file path |
-| `JOSHUA_LOG_LEVEL` | `INFO` | Log level |
+| `BLACKBOARD_URL` | `http://blackboard:9700` | Blackboard MCP endpoint |
+| `UNIFI_MCP_URL` | `http://unifi-mcp:9600` | UniFi MCP endpoint |
+| `OLLAMA_URL` | `http://ollama:11434` | Ollama API endpoint |
+| `VOICE_HOST` | `voice` | Voice server hostname |
+| `VOICE_PORT` | `9876` | Voice server port |
 
----
+### UniFi Controller
 
-## Network Defense Module
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UNIFI_HOST` | `192.168.100.1` | UDM Pro IP address |
+| `UNIFI_PORT` | `443` | Controller HTTPS port |
+| `UNIFI_USER` | — | Controller username |
+| `UNIFI_PASS` | — | Controller password |
+| `UNIFI_VERIFY_SSL` | `0` | SSL verification (0=skip) |
 
-The `UniFiDefenseLoop` runs as a background thread, polling UniFi MCP every 30 seconds:
+### W.O.P.R. Agent
 
-### Detection Pipeline
-
-1. **Threat Summary** — pulls IPS/IDS threat data from UniFi
-2. **Client Baseline** — tracks all connected devices, learns normal population
-3. **Anomaly Detection** — flags new devices, unknown OUIs, network changes, population spikes
-4. **Threat Classification** — assigns severity based on anomaly type and context
-5. **Auto-Response** — CRITICAL threats trigger automatic client blocking
-6. **Reporting** — all detections posted to Blackboard as findings + voice alerts on HIGH+
-
-### Severity Levels
-
-| Severity | Anomaly Types | Response |
-|----------|---------------|----------|
-| CRITICAL | Rogue AP detected | Auto-block + voice + Blackboard |
-| HIGH | Unknown OUI device, population spike, auth failure spike, IPS alert | Voice alert + Blackboard |
-| MEDIUM | New device (known OUI), unusual DPI | Blackboard finding |
-| LOW | Device network change | Blackboard finding |
-| INFO | Baseline learning, routine events | Log only |
-
-### Baseline Learning
-
-The behavioral baseline requires 10 polling cycles (~5 minutes) before it starts flagging anomalies. During learning, it catalogs:
-- All known MAC addresses and hostnames
-- OUI (manufacturer) prefixes
-- Client population trends over time
-- Network assignments per device
-
----
-
-## Blackboard MCP Integration
-
-W.O.P.R. communicates with other agents via the Blackboard MCP server using JSON-RPC over SSE transport:
-
-```python
-# Protocol: JSON-RPC 2.0 over HTTP POST to /mcp
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-        "name": "send_message",
-        "arguments": {
-            "from_agent": "wopr",
-            "to_agent": "operator",
-            "content": "W.O.P.R. ONLINE. Defense subsystems nominal.",
-            "message_type": "status"
-        }
-    }
-}
-```
-
-### Blackboard Capabilities
-
-- **Findings** — post security findings with severity, evidence, remediation
-- **Activity Log** — post timestamped perimeter status to Live Activity
-- **Training Data** — submit structured training examples for future fine-tuning
-- **Heartbeat** — periodic status for Mission Control monitoring
-
----
-
-## Learning System
-
-Every defense cycle with anomalies generates a structured training example:
-
-```
-context     →  What triggered the detection
-reasoning   →  Why this anomaly was classified at this severity
-action      →  The classification and response taken
-observation →  Raw sensor data summary
-conclusion  →  Threat assessment and recommended follow-up
-```
-
-Training examples are batched and flushed to Blackboard. The Blackboard aggregates examples from all agents for periodic QLoRA fine-tuning.
-
----
-
-## Voice Integration
-
-W.O.P.R. speaks through an F5-TTS voice clone server over TCP:
-
-```
-┌──────────┐    TCP :9876    ┌──────────────┐    CUDA    ┌─────────┐
-│  W.O.P.R.│ ──── text ────→ │ F5-TTS Voice │ ────────→  │  Audio  │
-│  Sentry  │ ←─── "OK" ──── │   Server     │            │ Playback│
-└──────────┘                 └──────────────┘            └─────────┘
-```
-
-- Text sent as UTF-8 line over TCP socket
-- Server responds with `OK` after synthesis and playback
-- 500-character limit per utterance
-- Only speaks HIGH+ severity threat alerts
-
----
-
-## File Structure
-
-```
-Joshua-AI/
-├── agent.py               # Defense sentry loop (monitor → detect → report)
-├── blackboard.py          # Blackboard MCP JSON-RPC client (SSE transport)
-├── config.py              # Configuration (AGENT_NAME="wopr")
-├── tools.py               # Tool wrappers (OSINT + MCP services)
-├── unifi_defense.py       # AI-augmented network defense module
-├── voice.py               # F5-TTS voice client (TCP) with pronunciation fixes
-├── memory.py              # Sliding window conversation memory
-├── learning.py            # Training example auto-generation
-├── joshua.modelfile       # Ollama Modelfile (dolphin-mistral + W.O.P.R. persona)
-├── local-joshua.service   # Systemd user service unit
-├── launch-wopr.sh         # Launch all services
-├── setup.sh               # One-command setup script
-├── requirements.txt       # Dependencies (stdlib only — no pip packages)
-└── __init__.py
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WOPR_MODEL` | `joshua:cybersec` | Ollama model name |
+| `DEVICE_DB_PATH` | `/data/wopr/wopr_devices.db` | Device database path |
+| `LOG_FILE` | `/data/logs/wopr.log` | Log file path |
+| `JOSHUA_VOICE_ENABLED` | `false` | Voice output (reserved for JOSHUA agent) |
 
 ---
 
 ## Model
 
-W.O.P.R. runs on **dolphin-mistral:7b-v2.8** — an uncensored Mistral 7B variant. The sentry personality is injected via Ollama Modelfile system prompt optimized for network defense observation and threat reporting.
+W.O.P.R. runs on **joshua:cybersec** — a QLoRA fine-tuned model optimized for network defense, threat classification, and security analysis. Built on dolphin-mistral:7b-v2.8 with cybersecurity training data generated from real defense observations.
 
-**Resource requirements:**
-- Disk: ~4.1 GB (GGUF quantized)
-- VRAM: ~4.5 GB (CUDA) or ~6 GB RAM (CPU mode)
-- Inference: ~2-5s per response on RTX 4070, ~15-30s on CPU
+**Resource Requirements:**
+- Disk: ~4.1 GB (Q4_K_M GGUF)
+- VRAM/Unified Memory: ~4.5 GB
+- Inference: ~3-8s per response on Jetson Orin Nano (MAXN mode)
 
 ---
 
-## Deployment Targets
+## Deployment
 
-| Platform | Model | Notes |
-|----------|-------|-------|
-| Kali Workstation | dolphin-mistral:7b-v2.8 (Q4) | Full GPU acceleration |
-| Jetson Orin Nano 8GB | Phi-3-mini-4k (Q4) or Mistral 7B (Q3) | ARM64 Ollama, sequential GPU sharing with voice |
-| USB Live Boot | Same as workstation | Kali persistence + encrypted data partition |
+### Docker Compose (Jetson — Recommended)
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/sirrand27/WOPR-AI.git
+cd WOPR-AI
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with your UniFi credentials and network settings
+
+# 3. Import the model (transfer GGUF separately — not in repo)
+# scp joshua_cybersec.gguf to the Jetson, then:
+docker compose up -d ollama
+docker exec wopr-ollama ollama create joshua:cybersec -f /opt/wopr/joshua_cybersec.Modelfile
+
+# 4. Start the full stack
+docker compose up -d
+
+# 5. Verify
+docker compose ps
+# Open http://<jetson-ip>:9700 for Mission Control
+```
+
+### Live Updates
+
+Code changes are deployed without rebuilding containers:
+
+```bash
+# Edit files in the repo, then push to Jetson
+scp blackboard/pwa/index.html user@jetson:/opt/wopr/blackboard/pwa/
+# Changes take effect immediately (bind-mounted volumes)
+
+# For Python changes that require restart:
+docker compose restart wopr-agent
+```
+
+### Bare Metal (Legacy)
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+ollama create joshua:cybersec -f joshua_cybersec.modelfile
+
+# Run directly
+python3 wopr/agent.py
+
+# Or install systemd service
+cp local-joshua.service ~/.config/systemd/user/
+systemctl --user enable --now local-joshua
+```
+
+---
+
+## Network Defense Pipeline
+
+```
+UniFi MCP Poll (30s) → Threat Summary → Client Baseline → Anomaly Detection
+                                                               │
+                          ┌────────────────────────────────────┘
+                          ▼
+                   Threat Classification
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+       CRITICAL        HIGH/MED        LOW/INFO
+    Auto-Block +    Blackboard +      Log Only
+    Voice Alert     Finding Post
+```
+
+### Severity Levels
+
+| Severity | Anomaly Types | Response |
+|----------|---------------|----------|
+| CRITICAL | Rogue AP, unauthorized device on secure VLAN | Auto-block + voice + Blackboard finding |
+| HIGH | Unknown OUI, population spike, auth failure burst, IPS alert | Blackboard finding + voice alert |
+| MEDIUM | New device (known OUI), unusual DPI pattern, miner temp warning | Blackboard finding |
+| LOW | Device network change, miner share anomaly | Blackboard finding |
+| INFO | Baseline learning, routine events | Log only |
 
 ---
 
