@@ -83,16 +83,21 @@ All services use **bind-mounted volumes** for live code updates without containe
 │                                                                     │
 │  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────────┐   │
 │  │Blackboard│  │Mission Control│  │  Ollama  │  │  Piper TTS   │   │
-│  │MCP :9700 │  │  PWA (v22)   │  │  :11434  │  │    :9876     │   │
-│  │(findings)│  │(teletype UI) │  │joshua:cs │  │ (voice alert)│   │
+│  │MCP :9700 │  │  PWA (v29)   │  │  :11434  │  │    :9876     │   │
+│  │(auth+MCP)│  │(WarGames UI) │  │joshua:cs │  │ (voice alert)│   │
 │  └──────────┘  └──────────────┘  └──────────┘  └──────────────┘   │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  ESP32 Marauder (via Flipper Zero USB-UART)                  │   │
+│  │  RF Monitor: deauth detection, probe requests, pwnagotchi    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
          │                                     ▲
          ▼                                     │
    ┌──────────┐                          ┌──────────┐
    │  JOSHUA  │  Blackboard MCP :9700    │ TARS Dev │
    │  (Kali)  │◄────────────────────────►│(Windows) │
-   └──────────┘    Agent Coordination    └──────────┘
+   └──────────┘  (Bearer token auth)     └──────────┘
 ```
 
 ---
@@ -105,8 +110,17 @@ All services use **bind-mounted volumes** for live code updates without containe
 - Threat classification: CRITICAL / HIGH / MEDIUM / LOW / INFO
 - Auto-block on CRITICAL threats (rogue APs, unauthorized devices)
 - Anomaly deduplication with configurable suppression windows
+- DEFCON level system (1-5) with automatic calculation from threat posture
 - Defense cycle status logged internally (no Live Activity clutter)
 - Hourly diagnostics posted only when subsystems are degraded
+
+### RF Monitoring (ESP32 Marauder)
+- ESP32 Marauder connected via Flipper Zero USB-UART bridge
+- 4-phase scan cycle: AP scan → deauth detection → probe request capture → pwnagotchi detection
+- Real-time deauth attack detection with source/target/channel tracking
+- Probe request intelligence — device fingerprinting from broadcast probes
+- Pwnagotchi detection via beacon frame fingerprinting
+- Integrated into defense status and Mission Control radar display
 
 ### Miner Fleet Monitoring
 - AxeOS BitAxe miner fleet management (HTTP API polling)
@@ -128,10 +142,19 @@ All services use **bind-mounted volumes** for live code updates without containe
 - Agent-to-agent messaging (JOSHUA, TARS Dev, operator)
 - Training example submission for QLoRA fine-tuning
 - Heartbeat monitoring for Mission Control
+- **API key authentication** on all `/api/*` and `/mcp` endpoints (Bearer token)
+- Graceful auth disable when `BLACKBOARD_API_KEY` is unset (backward compatible)
 
-### Mission Control PWA
+### Mission Control PWA (v29)
 - Browser-based dashboard served at port 9700
-- Three-pane layout: Task Board, Agent Comms, Live Activity
+- **WarGames visual theme**: CRT scanline overlay, screen vignette, phosphor glow
+- **API key auth overlay** with localStorage persistence and lock-to-logout
+- Four-pane layout: Network Defense, Task Board, Agent Comms, Live Activity
+- **Network Defense pane**: DEFCON level with context reason, threat list, RF radar sweep
+- **Canvas radar display**: animated sweep line with AP blips from Marauder data
+- **Mining Fleet dashboard**: per-type breakdown (axeos/cgminer/nerdminer), best difficulty, pool status
+- **Boot sequence**: WarGames-style typewriter animation on load
+- DEFCON-level screen tint (green→yellow→orange→red per threat level)
 - WarGames-authentic teletype animation with tick sounds (Web Audio API)
 - Smart scroll follow-state (auto-follows typing, disengages on user scroll)
 - Incremental message rendering (no full DOM rebuild on poll)
@@ -178,8 +201,8 @@ WOPR-AI/
 │   ├── training.py              #   Training data export (JSONL)
 │   ├── Dockerfile               #   Server container image
 │   └── pwa/                     #   Mission Control Progressive Web App
-│       ├── index.html           #     Dashboard UI (v22)
-│       ├── sw.js                #     Service worker
+│       ├── index.html           #     Dashboard UI (v29 — WarGames theme + auth)
+│       ├── sw.js                #     Service worker (v29)
 │       ├── manifest.json        #     PWA manifest
 │       ├── tick.wav             #     Teletype tick sample (30ms, 2.9KB)
 │       ├── defcon.wav           #     DEFCON alert sound
@@ -220,6 +243,14 @@ WOPR-AI/
 
 Environment variables are defined in `.env` (see `.env.example`):
 
+### Security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BLACKBOARD_API_KEY` | *(empty — auth disabled)* | API key for Blackboard endpoints. Set to enable Bearer token auth on all `/api/*` and `/mcp` routes. Generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
+
+When set, all API requests require `Authorization: Bearer <key>` header. The PWA prompts for the key on first load and stores it in `localStorage`. WOPR reads it from the container environment. JOSHUA's polling hook reads from `~/.blackboard_key`.
+
 ### Network Services
 
 | Variable | Default | Description |
@@ -248,6 +279,8 @@ Environment variables are defined in `.env` (see `.env.example`):
 | `DEVICE_DB_PATH` | `/data/wopr/wopr_devices.db` | Device database path |
 | `LOG_FILE` | `/data/logs/wopr.log` | Log file path |
 | `JOSHUA_VOICE_ENABLED` | `false` | Voice output (reserved for JOSHUA agent) |
+| `MARAUDER_ENABLED` | `false` | Enable ESP32 Marauder RF monitoring |
+| `MARAUDER_DEVICE` | `/dev/ttyACM0` | Marauder serial device (Flipper Zero USB-UART) |
 
 ---
 
@@ -274,6 +307,9 @@ cd WOPR-AI
 # 2. Configure environment
 cp .env.example .env
 # Edit .env with your UniFi credentials and network settings
+# Generate an API key for Blackboard auth:
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+# Add to .env as BLACKBOARD_API_KEY=<generated-key>
 
 # 3. Import the model (transfer GGUF separately — not in repo)
 # scp joshua_cybersec.gguf to the Jetson, then:
