@@ -481,6 +481,13 @@ class ThreatClassifier:
         "unknown_ap": SEVERITY_INFO,
         "suspicious_probe": SEVERITY_MEDIUM,
         "pwnagotchi_detected": SEVERITY_CRITICAL,
+        # Cross-layer correlation types
+        "evil_twin_detected": SEVERITY_CRITICAL,
+        "deauth_reconnect_detected": SEVERITY_HIGH,
+        "probe_associate_detected": SEVERITY_HIGH,
+        "coordinated_attack_detected": SEVERITY_CRITICAL,
+        # Threat intelligence match
+        "threat_intel_match": SEVERITY_CRITICAL,
     }
 
     @classmethod
@@ -569,6 +576,36 @@ class ThreatClassifier:
             return (f"PWNAGOTCHI DETECTED: {anomaly.get('name', 'unknown')} "
                     f"({anomaly.get('mac', '??')}) — war-driver in perimeter, "
                     f"{anomaly.get('sightings', 1)} sighting(s)")
+
+        # Cross-layer correlation types
+        elif atype == "evil_twin_detected":
+            return (f"EVIL TWIN DETECTED: deauth on {anomaly.get('deauth_target', '??')} "
+                    f"+ rogue AP {anomaly.get('ssid', '?')} ({anomaly.get('mac', '??')}) "
+                    f"within {anomaly.get('time_delta_s', '?')}s — "
+                    f"confidence: {anomaly.get('correlation_confidence', '?')}")
+
+        elif atype == "deauth_reconnect_detected":
+            return (f"Deauth→Reconnect: {anomaly.get('hostname', 'unknown')} ({anomaly.get('mac', '??')}) "
+                    f"deauthed by {anomaly.get('deauth_src', '??')} then reconnected to "
+                    f"{anomaly.get('new_network', '?')} within {anomaly.get('time_delta_s', '?')}s")
+
+        elif atype == "probe_associate_detected":
+            return (f"Probe→Associate: {anomaly.get('hostname', 'unknown')} ({anomaly.get('mac', '??')}) "
+                    f"probed SSIDs then joined {anomaly.get('joined_network', '?')} "
+                    f"within {anomaly.get('time_delta_s', '?')}s")
+
+        elif atype == "coordinated_attack_detected":
+            return (f"COORDINATED ATTACK: {anomaly.get('deauth_count', 0)} deauth events "
+                    f"from {len(anomaly.get('deauth_sources', []))} sources targeting "
+                    f"{len(anomaly.get('deauth_targets', []))} devices + population spike")
+
+        # Threat intelligence
+        elif atype == "threat_intel_match":
+            feeds = ", ".join(anomaly.get("feeds", []))
+            return (f"THREAT INTEL MATCH: {anomaly.get('hostname', 'unknown')} "
+                    f"({anomaly.get('mac', '??')}) communicating with known-bad "
+                    f"{anomaly.get('indicator_type', 'indicator')} "
+                    f"{anomaly.get('matched_indicator', '?')} (feeds: {feeds})")
 
         return f"Anomaly detected: {json.dumps(anomaly)}"
 
@@ -958,9 +995,12 @@ class AutoReporter:
         # Add fleet hashrate if miner monitor is active
         if self.miner_monitor and self.miner_monitor.enabled:
             fleet = self.miner_monitor.get_fleet_summary()
+            f_online = fleet.get('pool_online', fleet.get('online', '?'))
+            f_total = fleet.get('total_workers', fleet.get('total', '?'))
+            f_hr = fleet.get('total_hashrate_1h', fleet.get('total_hashrate', 0))
             report += (
-                f" Mining fleet: {fleet['online']}/{fleet['total']} online, "
-                f"{fleet['total_hashrate']:.1f} GH/s."
+                f" Mining fleet: {f_online}/{f_total} online, "
+                f"{f_hr:.1f} GH/s."
             )
 
         logger.info(f"[REPORT] {report}")
@@ -996,11 +1036,15 @@ class AutoReporter:
 
         if self.miner_monitor and self.miner_monitor.enabled:
             fleet = self.miner_monitor.get_fleet_summary()
+            f_online = fleet.get('pool_online', fleet.get('online', '?'))
+            f_total = fleet.get('total_workers', fleet.get('total', '?'))
+            f_hr = fleet.get('total_hashrate_1h', fleet.get('total_hashrate', 0))
+            f_diff = fleet.get('best_difficulty', fleet.get('best_diff', 0))
             report += (
-                f" Mining fleet: {fleet['total']} miners, "
-                f"{fleet['online']} online, "
-                f"{fleet['total_hashrate']:.1f} GH/s total, "
-                f"best difficulty {fleet['best_diff']}, "
+                f" Mining fleet: {f_total} miners, "
+                f"{f_online} online, "
+                f"{f_hr:.1f} GH/s total, "
+                f"best difficulty {f_diff}, "
                 f"{fleet.get('total_restarts', 0)} restarts today."
             )
 
@@ -1058,6 +1102,44 @@ class UniFiDefenseLoop:
                 logger.info("MarauderMonitor enabled — RF layer defense active")
         except Exception as e:
             logger.debug(f"MarauderMonitor not enabled: {e}")
+        # Cross-layer correlation engine
+        self.correlation = None
+        try:
+            from config import CORRELATION_ENABLED
+            if CORRELATION_ENABLED:
+                from correlation import CorrelationEngine
+                from config import CORRELATION_WINDOW, CORRELATION_BUFFER_SIZE
+                self.correlation = CorrelationEngine(CORRELATION_WINDOW, CORRELATION_BUFFER_SIZE)
+                logger.info("CorrelationEngine enabled — cross-layer detection active")
+        except Exception as e:
+            logger.debug(f"CorrelationEngine not enabled: {e}")
+        # Incident timeline generator
+        self.timeline = None
+        try:
+            from config import INCIDENT_TIMELINE_ENABLED
+            if INCIDENT_TIMELINE_ENABLED:
+                from incident_timeline import IncidentTimeline
+                from config import INCIDENT_TIMELINE_LOOKBACK, INCIDENT_TIMELINE_DEDUP
+                self.timeline = IncidentTimeline(
+                    blackboard, self.device_db,
+                    INCIDENT_TIMELINE_LOOKBACK, INCIDENT_TIMELINE_DEDUP)
+                logger.info("IncidentTimeline enabled — auto-timeline on HIGH+ events")
+        except Exception as e:
+            logger.debug(f"IncidentTimeline not enabled: {e}")
+        # Threat intelligence engine
+        self.threat_intel = None
+        try:
+            from config import THREAT_INTEL_ENABLED
+            if THREAT_INTEL_ENABLED:
+                from threat_intel import ThreatIntelEngine
+                from config import THREAT_INTEL_PULL_INTERVAL, THREAT_INTEL_FEEDS, DEVICE_DB_PATH
+                self.threat_intel = ThreatIntelEngine(
+                    db_path=DEVICE_DB_PATH,
+                    pull_interval=THREAT_INTEL_PULL_INTERVAL,
+                    enabled_feeds=THREAT_INTEL_FEEDS)
+                logger.info("ThreatIntelEngine enabled — threat feed integration active")
+        except Exception as e:
+            logger.debug(f"ThreatIntelEngine not enabled: {e}")
         self._thread = None
         self._running = False
         self._poll_count = 0
@@ -1282,6 +1364,30 @@ class UniFiDefenseLoop:
                 logger.error(f"Marauder poll error: {e}")
                 self.diagnostics.record_tool_error("marauder", e)
 
+        # 8c. Threat intelligence cross-reference
+        if self.threat_intel:
+            try:
+                # Pull feeds if due (daily refresh)
+                if self.threat_intel.should_pull():
+                    new_count = self.threat_intel.pull_feeds()
+                    if new_count > 0:
+                        self._post_activity(
+                            f"[THREAT_INTEL] Feed refresh: {new_count} indicators loaded "
+                            f"({len(self.threat_intel._bad_ips)} IPs, "
+                            f"{len(self.threat_intel._bad_domains)} domains)",
+                            entry_type="OK")
+                # Cross-reference clients against threat DB (every Nth cycle)
+                from config import THREAT_INTEL_CHECK_INTERVAL
+                if (self._poll_count % THREAT_INTEL_CHECK_INTERVAL == 0
+                        and self._poll_count > 0 and self._last_clients):
+                    ti_anomalies = self.threat_intel.check_client_connections(
+                        self._last_clients)
+                    for anomaly in ti_anomalies:
+                        self._handle_anomaly(anomaly)
+            except Exception as e:
+                logger.error(f"Threat intel check error: {e}")
+                self.diagnostics.record_tool_error("threat_intel", e)
+
         # 9. Record cycle timing + run diagnostics check
         _cycle_ms = int((time.time() - _cycle_start) * 1000)
         self.diagnostics.record_poll_cycle(_cycle_ms)
@@ -1335,6 +1441,7 @@ class UniFiDefenseLoop:
             if self.miner_monitor and getattr(self.miner_monitor, 'enabled', True):
                 try:
                     miner_fleet = self.miner_monitor.get_fleet_summary()
+                    miner_fleet["health_scores"] = self.miner_monitor.get_fleet_health()
                 except Exception:
                     pass
 
@@ -1357,6 +1464,8 @@ class UniFiDefenseLoop:
                     "cycle_avg_ms": int(diag.get("cycle_avg_ms", 0)),
                 },
                 "recent_anomalies": list(self._recent_anomalies)[-5:],
+                "correlation": self.correlation.get_status() if self.correlation else {"enabled": False},
+                "threat_intel": self.threat_intel.get_status() if self.threat_intel else {"enabled": False},
             }
 
             self.blackboard.update_defense_status(status)
@@ -1525,6 +1634,10 @@ class UniFiDefenseLoop:
         # Record for inquiry context (always, even if suppressed)
         self._recent_anomalies.append(f"[{severity}] {description}")
 
+        # Record for incident timeline context (always, even if suppressed)
+        if self.timeline:
+            self.timeline.record_anomaly(anomaly, severity, description)
+
         # Check suppression — skip Blackboard/voice/activity if within window
         suppressed, suppressed_count = self._is_suppressed(mac, anomaly_type, severity)
         if suppressed:
@@ -1600,6 +1713,30 @@ class UniFiDefenseLoop:
                 user_query=f"Network defense monitoring cycle {self._poll_count}",
                 agent_analysis=f"[{severity}] {description}",
             )
+
+        # Cross-layer correlation — feed anomaly, process any synthetic correlations
+        if self.correlation and anomaly.get("source") != "correlation":
+            try:
+                correlated = self.correlation.ingest(anomaly)
+                for corr_anomaly in correlated:
+                    self._handle_anomaly(corr_anomaly)
+            except Exception as e:
+                logger.error(f"Correlation engine error: {e}")
+
+        # Incident timeline — generate structured context on HIGH+ events
+        if self.timeline and self.timeline.should_generate(anomaly, severity):
+            try:
+                self.timeline.generate(
+                    anomaly, severity, description,
+                    baseline=self.baseline,
+                    posture=self.posture,
+                    diagnostics=self.diagnostics,
+                    marauder=self.marauder,
+                    miner_monitor=self.miner_monitor,
+                    correlation=self.correlation,
+                )
+            except Exception as e:
+                logger.error(f"Timeline generation error: {e}")
 
     # ── Detection Sub-Detectors (Enhancement 2) ────────────────
 

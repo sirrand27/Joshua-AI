@@ -148,6 +148,11 @@ MINER_AUTO_THROTTLE = os.environ.get("WOPR_MINER_AUTO_THROTTLE", "true").lower()
 MINER_THROTTLE_COOLDOWN = int(os.environ.get("WOPR_MINER_THROTTLE_COOLDOWN", "120"))  # seconds
 MINER_STALE_SHARE_THRESHOLD = float(os.environ.get("WOPR_MINER_STALE_SHARE_PCT", "5.0"))  # % reject ratio
 MINER_STALE_SHARE_POLLS = int(os.environ.get("WOPR_MINER_STALE_SHARE_POLLS", "3"))  # consecutive polls
+
+# --- Offline Auto-Restart ---
+MINER_OFFLINE_RESTART_THRESHOLD = int(os.environ.get("WOPR_MINER_OFFLINE_RESTART", "5"))  # consecutive failures
+MINER_OFFLINE_AUTO_RESTART = os.environ.get("WOPR_MINER_OFFLINE_AUTO_RESTART", "true").lower() == "true"
+MINER_HASHRATE_DROP_POLLS = int(os.environ.get("WOPR_MINER_HR_DROP_POLLS", "3"))  # consecutive low-hashrate polls
 MINER_SUBNET = "192.168.100"
 
 # --- Public Pool (authoritative source for all 26 workers) ---
@@ -217,6 +222,23 @@ MARAUDER_PWNAGOTCHI_INTERVAL = int(os.environ.get("WOPR_MARAUDER_PWNA_INTERVAL",
 MARAUDER_PWNAGOTCHI_DWELL = int(os.environ.get("WOPR_MARAUDER_PWNA_DWELL", "20"))  # seconds to dwell on sniffpwnagotchi
 MARAUDER_DEAUTH_BURST_THRESHOLD = int(os.environ.get("WOPR_MARAUDER_DEAUTH_BURST", "5"))  # frames in window
 MARAUDER_DEAUTH_BURST_WINDOW = int(os.environ.get("WOPR_MARAUDER_DEAUTH_WINDOW", "30"))  # seconds
+
+# === Cross-Layer Correlation ===
+CORRELATION_ENABLED = os.environ.get("WOPR_CORRELATION_ENABLED", "true").lower() == "true"
+CORRELATION_WINDOW = int(os.environ.get("WOPR_CORRELATION_WINDOW", "120"))  # seconds
+CORRELATION_BUFFER_SIZE = int(os.environ.get("WOPR_CORRELATION_BUFFER", "500"))
+
+# === Incident Timelines ===
+INCIDENT_TIMELINE_ENABLED = os.environ.get("WOPR_TIMELINE_ENABLED", "true").lower() == "true"
+INCIDENT_TIMELINE_LOOKBACK = int(os.environ.get("WOPR_TIMELINE_LOOKBACK", "300"))  # 5 min
+INCIDENT_TIMELINE_DEDUP = int(os.environ.get("WOPR_TIMELINE_DEDUP", "600"))  # 10 min
+
+# === Threat Intelligence ===
+THREAT_INTEL_ENABLED = os.environ.get("WOPR_THREAT_INTEL_ENABLED", "true").lower() == "true"
+THREAT_INTEL_PULL_INTERVAL = int(os.environ.get("WOPR_THREAT_INTEL_PULL", "86400"))  # 24 hours
+THREAT_INTEL_CHECK_INTERVAL = int(os.environ.get("WOPR_THREAT_INTEL_CHECK", "10"))  # every Nth defense cycle
+THREAT_INTEL_FEEDS = os.environ.get("WOPR_THREAT_INTEL_FEEDS",
+    "feodo_c2,urlhaus_online,threatfox_iocs").split(",")
 
 # === Anomaly Suppression ===
 ANOMALY_SUPPRESSION_WINDOW = int(os.environ.get("WOPR_ANOMALY_SUPPRESSION", "900"))  # 15 min default

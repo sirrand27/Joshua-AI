@@ -22,6 +22,8 @@ from config import (
     MINER_SUBNET, PUBLIC_POOL_URL, PUBLIC_POOL_BTC_ADDRESS,
     PUBLIC_POOL_POLL_INTERVAL, MINER_STALE_SHARE_THRESHOLD,
     MINER_STALE_SHARE_POLLS,
+    MINER_OFFLINE_RESTART_THRESHOLD, MINER_OFFLINE_AUTO_RESTART,
+    MINER_HASHRATE_DROP_POLLS,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,12 @@ class MinerMonitor:
         # Pool API failover tracking
         self._pool_fail_count = 0
         self._pool_down = False
+        # Pool failover recovery verification
+        self._pre_outage_workers = {}
+        self._post_recovery_check_pending = False
+        self._recovery_check_time = 0
+        # Sustained hashrate drop tracking
+        self._low_hashrate_count = {}
 
         if self.enabled:
             self._load_known_miners()
@@ -205,6 +213,11 @@ class MinerMonitor:
                         "ip": ip,
                         "consecutive_failures": self._fail_count[mac],
                     })
+                # Auto-restart after sustained offline
+                if (MINER_OFFLINE_AUTO_RESTART
+                        and self._fail_count[mac] >= MINER_OFFLINE_RESTART_THRESHOLD):
+                    if self._auto_restart_offline(ip, mac):
+                        self._fail_count[mac] = 0
                 offline += 1
                 continue
 
@@ -330,6 +343,14 @@ class MinerMonitor:
             self._pool_fail_count += 1
             if self._pool_fail_count >= 3 and not self._pool_down:
                 self._pool_down = True
+                # Snapshot worker states for recovery verification
+                self._pre_outage_workers = {}
+                try:
+                    all_pw = self.device_db.get_all_pool_workers()
+                    for pw in all_pw:
+                        self._pre_outage_workers[pw["worker_name"]] = pw.get("status", "unknown")
+                except Exception:
+                    pass
                 logger.warning(f"[POOL] Public Pool API DOWN after {self._pool_fail_count} failures: {e}")
                 self.voice.speak(
                     "Mining fleet. Public pool API is unreachable. "
@@ -348,7 +369,9 @@ class MinerMonitor:
         # Pool API recovered
         if self._pool_down:
             self._pool_down = False
-            logger.info("[POOL] Public Pool API recovered")
+            self._post_recovery_check_pending = True
+            self._recovery_check_time = time.time()
+            logger.info("[POOL] Public Pool API recovered — scheduling recovery verification")
             self.voice.speak("Mining fleet. Public pool API connection restored.")
             cst_stamp = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d %H:%M:%S CST")
             self.blackboard.post_activity(
@@ -356,6 +379,34 @@ class MinerMonitor:
                 entry_type="OK",
             )
         self._pool_fail_count = 0
+
+        # Post-recovery: verify workers reconnected after grace period
+        if self._post_recovery_check_pending and not self._pool_down:
+            import time as _t
+            if _t.time() - self._recovery_check_time > 120:
+                self._post_recovery_check_pending = False
+                missing = []
+                for wname, pre_status in self._pre_outage_workers.items():
+                    if pre_status == "online":
+                        pw = self.device_db.get_pool_worker(wname)
+                        if pw and pw.get("status") != "online":
+                            missing.append(wname)
+                if missing:
+                    logger.warning(
+                        f"[POOL] Post-recovery: {len(missing)} workers did not reconnect: "
+                        f"{', '.join(missing[:5])}"
+                    )
+                    self.blackboard.post_finding(
+                        title="Pool Recovery: Workers Missing",
+                        severity="MEDIUM",
+                        description=(
+                            f"After pool recovery, {len(missing)} workers have not reconnected: "
+                            f"{', '.join(missing)}. Manual check recommended."
+                        ),
+                    )
+                else:
+                    logger.info("[POOL] Post-recovery: all workers reconnected successfully")
+                self._pre_outage_workers = {}
 
         workers = data.get("workers", [])
         if not workers:
@@ -497,21 +548,43 @@ class MinerMonitor:
         return None
 
     def _check_hashrate(self, mac, hashrate):
-        """Check if hashrate has dropped below 50% of average."""
+        """Check for hashrate anomalies: near-zero or sustained 50%+ drop."""
         miner = self.device_db.get_miner(mac)
         if not miner:
             return None
         avg = miner.get("avg_hashrate", 0)
-        if avg > 0 and hashrate < avg * 0.5 and hashrate > 0:
-            name = self._mac_to_name.get(mac, mac)
+        name = self._mac_to_name.get(mac, mac)
+
+        # Near-zero on a miner that normally hashes (possible firmware compromise)
+        if avg > 0.1 and hashrate < 0.01:
+            self._low_hashrate_count[mac] = 0
             return {
                 "type": "miner_hashrate_drop",
                 "mac": mac,
                 "hostname": name,
                 "current": hashrate,
                 "average": avg,
-                "ratio": round(hashrate / avg, 2),
+                "ratio": 0.0,
+                "alert": "NEAR_ZERO_HASHRATE",
             }
+
+        # Sustained significant drop (>50% below average for N consecutive polls)
+        if avg > 0 and hashrate > 0 and hashrate < avg * 0.5:
+            self._low_hashrate_count[mac] = self._low_hashrate_count.get(mac, 0) + 1
+            if self._low_hashrate_count[mac] >= MINER_HASHRATE_DROP_POLLS:
+                self._low_hashrate_count[mac] = 0
+                return {
+                    "type": "miner_hashrate_drop",
+                    "mac": mac,
+                    "hostname": name,
+                    "current": hashrate,
+                    "average": avg,
+                    "ratio": round(hashrate / avg, 2),
+                    "alert": "SUSTAINED_DROP",
+                }
+        else:
+            self._low_hashrate_count.pop(mac, None)
+
         return None
 
     def _check_share_quality(self, mac, shares_accepted, shares_rejected, wifi_rssi):
@@ -599,6 +672,51 @@ class MinerMonitor:
 
         except (urllib.error.URLError, OSError) as e:
             logger.error(f"[MINER] Restart failed for {name} at {ip}: {e}")
+            return False
+
+    def _auto_restart_offline(self, ip, mac):
+        """Attempt to restart an unresponsive miner via AxeOS API.
+        Different from thermal restart — the info endpoint failed but
+        the restart endpoint may still respond."""
+        import time
+        name = self._mac_to_name.get(mac, mac)
+        now = time.time()
+
+        last_restart = self._restart_cooldown.get(mac, 0)
+        if now - last_restart < 300:
+            logger.info(f"[MINER] Offline restart cooldown active for {name}, skipping")
+            return False
+
+        url = f"http://{ip}/api/system/restart"
+        try:
+            req = urllib.request.Request(url, data=b"", method="POST")
+            with urllib.request.urlopen(req, timeout=_AXEOS_TIMEOUT) as resp:
+                resp.read()
+            logger.warning(
+                f"[MINER] OFFLINE RESTART: {name} ({mac}) at {ip} — "
+                f"unresponsive for {self._fail_count.get(mac, 0)} consecutive polls"
+            )
+            self._restart_cooldown[mac] = now
+            self.device_db.record_miner_restart(mac)
+
+            if mac in self._throttled_miners:
+                del self._throttled_miners[mac]
+                self._below_warning_count.pop(mac, None)
+
+            self.voice.speak(
+                f"Mining fleet. Restarting offline miner {name}. "
+                f"Unit was unresponsive for {self._fail_count.get(mac, 0)} consecutive polls."
+            )
+
+            cst_stamp = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d %H:%M:%S CST")
+            self.blackboard.post_activity(
+                f"[{cst_stamp}] [MINER] OFFLINE RESTART: {name} ({mac}) at {ip} — "
+                f"unresponsive for {self._fail_count.get(mac, 0)} polls",
+                entry_type="WARN",
+            )
+            return True
+        except (urllib.error.URLError, OSError) as e:
+            logger.error(f"[MINER] Offline restart failed for {name} at {ip}: {e}")
             return False
 
     # ── Clock Throttle / Restore ──────────────────────────────────
@@ -790,6 +908,108 @@ class MinerMonitor:
             "throttled": len(self._throttled_miners),
             "pool_api_down": self._pool_down,
         }
+
+    def get_fleet_health(self):
+        """Compute per-miner composite health score (0-100).
+        Components: temperature (25%), hashrate stability (25%),
+        uptime (20%), share quality (15%), WiFi RSSI (15%)."""
+        all_miners = self.device_db.get_all_miners()
+        results = {}
+
+        for miner in all_miners:
+            mac = miner.get("mac", "")
+            if not mac:
+                continue
+
+            # Temperature score (25%)
+            temp = miner.get("temp", miner.get("last_temp", 0)) or 0
+            if temp <= 0:
+                temp_score = 50.0
+            elif temp <= 55:
+                temp_score = 100.0
+            elif temp <= 65:
+                temp_score = 100.0 - ((temp - 55) / 10) * 30
+            elif temp <= 70:
+                temp_score = 70.0 - ((temp - 65) / 5) * 40
+            else:
+                temp_score = max(0, 30.0 - ((temp - 70) / 5) * 30)
+
+            # Hashrate stability (25%)
+            current_hr = miner.get("hashrate", miner.get("last_hashrate", 0)) or 0
+            avg_hr = miner.get("avg_hashrate", 0) or 0
+            if avg_hr > 0 and current_hr > 0:
+                ratio = min(current_hr / avg_hr, 1.2)
+                hr_score = min(100.0, ratio * 83.3)  # 1.0 ratio = 83, 1.2+ = 100
+            elif miner.get("status") == "offline":
+                hr_score = 0.0
+            else:
+                hr_score = 50.0
+
+            # Uptime (20%)
+            restarts = miner.get("restart_count", miner.get("total_restarts", 0)) or 0
+            offline_count = miner.get("offline_count", 0) or 0
+            uptime_penalty = min(100, (restarts * 5) + (offline_count * 10))
+            uptime_score = max(0.0, 100.0 - uptime_penalty)
+
+            # Share quality (15%)
+            accepted = miner.get("shares_accepted", 0) or 0
+            rejected = miner.get("shares_rejected", 0) or 0
+            total_shares = accepted + rejected
+            if total_shares > 10:
+                reject_pct = (rejected / total_shares) * 100
+                share_score = max(0.0, 100.0 - (reject_pct * 10))
+            else:
+                share_score = 50.0
+
+            # WiFi RSSI (15%)
+            rssi = miner.get("wifi_rssi", 0) or 0
+            if rssi == 0:
+                rssi_score = 50.0
+            elif rssi >= -50:
+                rssi_score = 100.0
+            elif rssi >= -65:
+                rssi_score = 80.0
+            elif rssi >= -75:
+                rssi_score = 50.0
+            elif rssi >= -85:
+                rssi_score = 20.0
+            else:
+                rssi_score = 0.0
+
+            composite = (
+                temp_score * 0.25
+                + hr_score * 0.25
+                + uptime_score * 0.20
+                + share_score * 0.15
+                + rssi_score * 0.15
+            )
+
+            if composite >= 90:
+                grade = "A"
+            elif composite >= 75:
+                grade = "B"
+            elif composite >= 60:
+                grade = "C"
+            elif composite >= 40:
+                grade = "D"
+            else:
+                grade = "F"
+
+            results[mac] = {
+                "score": round(composite, 1),
+                "grade": grade,
+                "hostname": miner.get("hostname", mac),
+                "status": miner.get("status", "unknown"),
+                "components": {
+                    "temperature": round(temp_score, 1),
+                    "hashrate_stability": round(hr_score, 1),
+                    "uptime": round(uptime_score, 1),
+                    "share_quality": round(share_score, 1),
+                    "wifi_signal": round(rssi_score, 1),
+                },
+            }
+
+        return results
 
     def get_miner_detail(self, identifier):
         """Get detail for a specific miner by MAC, hostname, or pool worker name."""
